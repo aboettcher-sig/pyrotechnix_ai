@@ -143,3 +143,7 @@ pyroSim run --aoi-bounds -120.55 39.00 -120.30 39.20 --ignition-lonlat -120.40 3
 populates the cache on a miss, so the first `run` alone is enough to speed up later ones — the
 explicit `fetch` step is optional. The AOI/date/grid parameters must match for a cache hit;
 delete the cache directory to invalidate it.
+
+Earth Engine is initialized **lazily**, only when a layer is missing from the cache. A `run`
+whose AOI/date is fully cached needs no EE authentication or network call at all, so batches of
+runs at different ignition points stay offline and fast.

@@ -33,19 +33,30 @@ def build_inputs(config, store=None):
 
 
 def fetch_layers(config, store=None):
-    """Return (static dict, WeatherStack), loading from and populating `store` when given."""
-    region = gee.aoi_geometry(config.aoi_bounds)
+    """Return (static dict, WeatherStack), loading from and populating `store` when given.
+
+    Earth Engine is initialized lazily: a fully cached AOI/date needs neither EE auth nor a
+    network call, so repeated runs at new ignition points stay offline and fast.
+    """
     scale = gee.compute_scale(config.aoi_bounds, config.max_pixels, config.min_scale_m)
+    region_state = {"region": None, "ready": False}  # EE initialized + region built on first fetch
+
+    def ensure_region():
+        if not region_state["ready"]:
+            gee.initialize_ee(config.ee_project)
+            region_state["region"] = gee.aoi_geometry(config.aoi_bounds)
+            region_state["ready"] = True
+        return region_state["region"]
 
     static = store.load_static(config) if store else None
     if static is None:
-        static = fetch_static(config, region, scale)
+        static = fetch_static(config, ensure_region(), scale)
         if store:
             store.save_static(config, static)
 
     weather_stack = store.load_weather(config) if store else None
     if weather_stack is None:
-        weather_stack = weather.get_weather(config, region, scale)
+        weather_stack = weather.get_weather(config, ensure_region(), scale)
         if store:
             store.save_weather(config, weather_stack)
 

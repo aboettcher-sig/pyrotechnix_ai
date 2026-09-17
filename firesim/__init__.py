@@ -33,8 +33,11 @@ def _store_for(config: SimulationConfig):
 
 
 def run(config: SimulationConfig):
-    """Initialize Earth Engine and run one simulation end to end (using the cache if set)."""
-    initialize_ee(config.ee_project)
+    """Run one simulation end to end (using the cache if set).
+
+    Earth Engine is initialized lazily inside the fetch path, so a fully cached AOI/date runs
+    without any EE auth or network call.
+    """
     return run_simulation(config, _store_for(config))
 
 
@@ -42,6 +45,5 @@ def prepare_data(config: SimulationConfig):
     """Fetch and cache the static + weather layers for an AOI/date without running the engine."""
     if not config.cache_dir:
         raise ValueError("prepare_data requires config.cache_dir to be set.")
-    initialize_ee(config.ee_project)
     fetch_layers(config, _store_for(config))
     return config.cache_dir

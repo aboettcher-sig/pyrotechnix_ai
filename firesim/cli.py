@@ -156,12 +156,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         cache_dir=args.cache_dir,
     )
 
-    print(f"Initializing Earth Engine (project: {config.ee_project or 'unset'})...")
-    initialize_ee(config.ee_project)
-
     store = DataStore(config.cache_dir) if config.cache_dir else None
     if store:
         print(f"Using cache: {config.cache_dir}")
+    # Earth Engine is initialized lazily, only if a layer is missing from the cache.
     print("Running simulation...")
     results = run_simulation(config, store)
 
