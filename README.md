@@ -72,6 +72,7 @@ run it via `uv run pyroSim run ...` or `.venv/bin/pyroSim run ...`. The equivale
 | `--no-crown-fire` | no | Zero the canopy layers (surface fire only; also removes canopy wind sheltering). |
 | `--output-name NAME`, `-o NAME` | yes | Output GeoTIFF filename (a `.tif` extension is added if missing). |
 | `--summary-json PATH` | no | Also write a JSON summary (scenario, stats, grid, weather source used). |
+| `--cache-dir DIR` | no | Reuse fetched Earth Engine layers across runs (see below). |
 | `--mock` | no | Skip Earth Engine and pyretechnics; write a synthetic result with the same format, in seconds. |
 
 Run `pyroSim run --help` for the full reference.
@@ -86,6 +87,32 @@ A single-band GeoTIFF (`EPSG:4326`) named after `--output-name`:
   6‑hourly WeatherNext step, 48 h for daily GRIDMET).
 - **`-999`** = cells that never burn (including masked water); this is the nodata value.
 
+## Reusing fetched data (cache)
+
+Earth Engine downloads are most of a run. `--cache-dir DIR` stores fetched layers and reuses them:
+
+- **static** — terrain, fuel model, canopy, water. Keyed by the area grid **and the fuel source**
+  (plus the LANDFIRE version), so LANDFIRE and NLCD runs never share an entry.
+- **weather** — the weather cubes. Keyed by the area grid, date and backend, never by fuels.
+
+Changing only the ignition point is a full hit; changing only the date refetches weather alone;
+`enable_crown_fire` is applied after loading, so toggling it needs no refetch. Measured on a
+10-day Shelly run: **13.3 s cold, 3.6 s cached**, and a cached run needs no Earth Engine auth or
+network at all. Entries are small (~0.4 MB per area/date).
+
+```bash
+# Warm an area once (no simulation)
+pyroSim fetch --aoi-bounds -123.13 41.41 -122.89 41.56 \
+  --ignition-date 2024-07-03 --projection-days 10 --cache-dir ./cache
+
+# Then every ignition point in that area is fast
+pyroSim run --aoi-bounds -123.13 41.41 -122.89 41.56 --ignition-lonlat -123.06 41.46 \
+  --ignition-date 2024-07-03 --projection-days 10 --cache-dir ./cache -o shelly.tif
+```
+
+`run` also fills the cache on a miss, so `fetch` is optional. Delete the directory to invalidate.
+`--mock` never touches the cache.
+
 ## Natural-language agent
 
 `agents/pyrosim_agent/` is a Google ADK agent that runs and compares pyroSim simulations from
@@ -99,7 +126,8 @@ cd agents && adk web          # or: adk run pyrosim_agent
 
 It needs the Vertex AI API enabled on the project and application-default credentials
 (`gcloud auth application-default login`). `PYROSIM_MODE=mock` (default) uses `--mock`; set
-`PYROSIM_MODE=real` for real runs. Ask it to "show me" a run and the `show_map` tool draws it: an image in the chat
+`PYROSIM_MODE=real` for real runs. The agent caches layers under `cache/` (`PYROSIM_CACHE_DIR`)
+and has a `prepare_area` tool that warms an area before a batch of runs. Ask it to "show me" a run and the `show_map` tool draws it: an image in the chat
 plus an interactive HTML map under `runs/`.
 
 ### Map + chat app

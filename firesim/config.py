@@ -35,6 +35,9 @@ class SimulationConfig:
     water_fraction_threshold: float = 0.25    # flag a cell as water if >= this fraction is water
     water_buffer_cells: int = 2               # dilate the water mask by N cells (impervious boundary)
 
+    # --- Data cache (reuse fetched layers across runs; None disables) ---
+    cache_dir: str | None = None
+
     # --- Grid / performance ---
     start_hour: int = 12        # hour of day (UTC) the fire starts
     max_pixels: int = 160       # longest AOI side in pixels (controls resolution/cost)

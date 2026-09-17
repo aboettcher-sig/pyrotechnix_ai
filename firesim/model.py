@@ -1,5 +1,7 @@
 """Assemble pyretechnics inputs, run the spread engine, and summarize results."""
 
+import time
+
 import numpy as np
 import pyretechnics.eulerian_level_set as els
 from pyretechnics.space_time_cube import SpaceTimeCube
@@ -38,19 +40,63 @@ def fetch_fuels(config, region, scale):
     else:
         raise ValueError(f"Unknown fuel_source {config.fuel_source!r}; use 'landfire' or 'nlcd'.")
 
-    if not config.enable_crown_fire:
-        canopy = {name: np.zeros_like(arr) for name, arr in canopy.items()}
     return physics.sanitize_fuel_model(fuel_model), canopy, water
 
 
-def build_inputs(config):
-    """Fetch every layer from Earth Engine and wrap them as SpaceTimeCubes."""
-    region = gee.aoi_geometry(config.aoi_bounds)
-    scale = gee.compute_scale(config.aoi_bounds, config.max_pixels, config.min_scale_m)
+def fetch_layers(config, store=None):
+    """Return (static arrays, WeatherStack, info), using and populating `store` when given.
 
+    Earth Engine is initialized lazily, so a fully cached area/date runs with no auth and no
+    network call — that is what makes repeated runs at new ignition points fast.
+    """
+    scale = gee.compute_scale(config.aoi_bounds, config.max_pixels, config.min_scale_m)
+    region_state = {}
+
+    def region():
+        if "region" not in region_state:
+            gee.initialize_ee(config.ee_project)
+            region_state["region"] = gee.aoi_geometry(config.aoi_bounds)
+        return region_state["region"]
+
+    info = {"static": "hit", "weather": "hit", "cache_dir": str(store.root) if store else None}
+    started = time.time()
+
+    static = store.load_static(config) if store else None
+    if static is None:
+        info["static"] = "miss" if store else "off"
+        static = fetch_static(config, region(), scale)
+        if store:
+            store.save_static(config, static)
+
+    weather_stack = store.load_weather(config) if store else None
+    if weather_stack is None:
+        info["weather"] = "miss" if store else "off"
+        weather_stack = weather.get_weather(config, region(), scale)
+        if store:
+            store.save_weather(config, weather_stack)
+
+    info["fetch_seconds"] = round(time.time() - started, 2)
+    return static, weather_stack, info
+
+
+def fetch_static(config, region, scale) -> dict:
+    """Fetch the date-independent layers: terrain, fuel model, canopy, water.
+
+    Canopy is stored as fetched; `enable_crown_fire` is applied when assembling, so switching it
+    does not need a refetch.
+    """
     slope, aspect = gee.fetch_topography(region, scale)
     fuel_model, canopy, water = fetch_fuels(config, region, scale)
-    weather_stack = weather.get_weather(config, region, scale)
+    return {"slope": slope, "aspect": aspect, "fuel_model": fuel_model, "water": water, **canopy}
+
+
+def assemble_inputs(config, static, weather_stack, scale):
+    """Wrap fetched layers as SpaceTimeCubes on one aligned grid (no network)."""
+    slope, aspect, water = static["slope"], static["aspect"], static["water"]
+    fuel_model = static["fuel_model"]
+    canopy = {name: static[name] for name in physics.CANOPY_LAYERS}
+    if not config.enable_crown_fire:
+        canopy = {name: np.zeros_like(arr) for name, arr in canopy.items()}
 
     # Align all layers to a common grid (downloads can differ by a pixel).
     sample = next(iter(weather_stack.cubes.values()))
@@ -98,9 +144,20 @@ def build_inputs(config):
     return space_time_cubes, meta
 
 
-def run_simulation(config):
+def build_inputs(config, store=None):
+    """Fetch (or load cached) every layer and wrap them as SpaceTimeCubes."""
+    scale = gee.compute_scale(config.aoi_bounds, config.max_pixels, config.min_scale_m)
+    static, weather_stack, info = fetch_layers(config, store)
+    space_time_cubes, meta = assemble_inputs(config, static, weather_stack, scale)
+    meta["cache"] = info
+    return space_time_cubes, meta
+
+
+def run_simulation(config, store=None):
     """Build inputs, spread the fire, and return matrices + metadata + stats."""
-    space_time_cubes, meta = build_inputs(config)
+    started = time.time()
+    space_time_cubes, meta = build_inputs(config, store)
+    build_seconds = time.time() - started
     ignition_rc = lonlat_to_rc(*config.ignition_lonlat, config.aoi_bounds, meta["rows"], meta["cols"])
 
     spread_state = els.SpreadState(meta["cube_shape"]).ignite_cell(ignition_rc)
@@ -115,6 +172,7 @@ def run_simulation(config):
     matrices = result["spread_state"].get_full_matrices()
     if meta["non_land_mask"] is not None:
         matrices["time_of_arrival"][meta["non_land_mask"]] = np.nan
+    meta.setdefault("cache", {})["engine_seconds"] = round(time.time() - started - build_seconds, 2)
     stats = compute_stats(matrices, meta["scale"], result)
     return {"matrices": matrices, "meta": meta, "stats": stats, "ignition_rc": ignition_rc}
 

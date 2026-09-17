@@ -139,6 +139,7 @@ The agent is a thin planner over deterministic tools. It chooses which tools to 
 | `get_forecast` | bbox, start, hours | hourly wind, gusts, RH, temp | later |
 | `fire_weather_summary` | forecast | critical hours, HDW index, active red flag warnings | later |
 | `estimate_fuel_moisture` | forecast | hourly dead fuel moisture, live assumptions | later |
+| `prepare_area` / `cache_status` | area, date, weather/fuel source | warms and reports the layer cache so later runs skip the download | Phase 0 |
 | `run_ensemble` | base scenario, members, what to vary | ensemble\_id; stacks member rasters into burn probability | later (needs CLI variation arguments) |
 | `assess_fire_effects` | run or ensemble id | good/bad verdict, drivers | later |
 | `find_analogs` | bbox, conditions | past fires and days that looked like this | later |
@@ -294,6 +295,7 @@ History, effects and weather mocks are deferred until those workstreams start.
 - Only one machine has the real data and services, so teammates build against the mock server and integrate on the demo laptop. Whoever owns that laptop does not also run anything heavy during the demo.
 - Close Earth Engine exports and other background jobs before demoing; a competing process is the likeliest cause of a slow live run.
 - If the laptop turns out to be the bottleneck, the escape hatch is moving only the simulation to a cloud VM. Today the contract is a local CLI, so that move means wrapping `pyroSim run` in a small HTTP service and pointing `run_simulation` at it; the tool signatures stay the same.
+- **Layer cache (`--cache-dir`, `pyroSim fetch`)**: static layers keyed by area + fuel source, weather by area + date. A 10-day Shelly run goes from 13.3 s to 3.6 s, and a cached run needs no network at all. Caveat: each CLI run still pays ~3.2 s of Python import, so the ensemble runner should execute members **in one process** rather than one subprocess per member.
 - Measured on the laptop in Phase 0: a 2-day real run on the 0.25° × 0.2° Sierra box (162 × 203 cells, 138 m) takes about 16 seconds end to end; the same run in mock mode takes about 3 seconds and returns the same grid.
 
 ## Risks and open questions

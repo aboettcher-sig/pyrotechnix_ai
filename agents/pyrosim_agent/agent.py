@@ -23,6 +23,8 @@ root_agent = llm_agent.Agent(
         tools.list_example_areas,
         tools.list_example_fires,
         tools.run_simulation,
+        tools.prepare_area,
+        tools.cache_status,
         tools.get_run,
         tools.list_runs,
         tools.compare_runs,

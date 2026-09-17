@@ -15,6 +15,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -33,6 +34,7 @@ if str(REPO_ROOT) not in sys.path:  # firesim lives at the repo root, next to ag
 from firesim import observed  # noqa: E402
 
 RUNS_DIR = Path(os.environ.get("PYROSIM_RUNS_DIR", REPO_ROOT / "runs"))
+CACHE_DIR = Path(os.environ.get("PYROSIM_CACHE_DIR", REPO_ROOT / "cache"))
 NODATA = -999.0
 ACRES_PER_HECTARE = 2.47105
 
@@ -112,7 +114,7 @@ def _edge_limited(tif_path: Path) -> dict:
 def _public_record(record: dict) -> dict:
     """The part of a run record worth showing the model (no absolute paths or raw logs)."""
     keys = ("run_id", "label", "status", "mode", "created_at", "scenario", "weather_source_used",
-            "fuel_source_used", "summary", "growth", "edge", "grid", "error")
+            "fuel_source_used", "cache", "summary", "growth", "edge", "grid", "error")
     return {k: record[k] for k in keys if k in record}
 
 
@@ -217,6 +219,7 @@ def run_simulation(
         "--projection-days", str(projection_days),
         "--weather-source", weather_source,
         "--fuel-source", fuel_source,
+        "--cache-dir", str(CACHE_DIR),
         "--output-name", str(tif_path),
         "--summary-json", str(summary_path),
     ]
@@ -260,6 +263,7 @@ def run_simulation(
             status="done",
             weather_source_used=summary["weather_source_used"],
             fuel_source_used=summary.get("fuel_source_used", fuel_source),
+            cache=summary.get("cache", {}),
             grid=summary["grid"],
             output_path=str(tif_path),
             summary={
@@ -305,6 +309,51 @@ def severity_summary(run_id: str) -> dict:
         "burned_hectares": record["summary"]["burned_hectares"],
         **severity,
     }
+
+
+def prepare_area(west: float, south: float, east: float, north: float, ignition_date: str,
+                 projection_days: int, weather_source: str = "gridmet",
+                 fuel_source: str = "landfire") -> dict:
+    """Download an area's terrain, fuels, canopy and weather once, so later runs are fast.
+
+    Call this before running several simulations in the same area and date — for example before
+    comparing ignition points. Afterwards each run skips the download entirely (roughly 13 s to
+    3.5 s on a typical area), and needs no network at all.
+
+    Returns how long the download took and which layers were already cached.
+    """
+    command = [
+        sys.executable, "-m", "firesim", "fetch",
+        "--aoi-bounds", str(west), str(south), str(east), str(north),
+        "--ignition-date", ignition_date,
+        "--projection-days", str(projection_days),
+        "--weather-source", weather_source,
+        "--fuel-source", fuel_source,
+        "--cache-dir", str(CACHE_DIR),
+    ]
+    if _mode() != "real":
+        return {"status": "done", "note": "Mock mode fetches nothing, so there is nothing to prepare.",
+                "mode": "mock"}
+    started = time.time()
+    completed = subprocess.run(command, cwd=REPO_ROOT, capture_output=True, text=True,
+                               timeout=REAL_RUN_TIMEOUT_S)
+    if completed.returncode != 0:
+        lines = [line for line in completed.stderr.strip().splitlines() if line.strip()]
+        return {"status": "error", "error": "\n".join(lines[-3:]) or "pyroSim fetch failed."}
+    return {
+        "status": "done",
+        "seconds": round(time.time() - started, 1),
+        "area": [west, south, east, north],
+        "ignition_date": ignition_date,
+        "detail": completed.stdout.strip().splitlines()[-2:],
+        "note": "Runs in this area and date now skip the download.",
+    }
+
+
+def cache_status() -> dict:
+    """How much simulation data is cached on disk (entries and megabytes)."""
+    from firesim.cache import DataStore
+    return {"status": "done", **DataStore(CACHE_DIR).usage()}
 
 
 def get_run(run_id: str) -> dict:

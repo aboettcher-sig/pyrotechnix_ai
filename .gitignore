@@ -19,3 +19,6 @@ runs/
 
 # ADK local session store
 .adk/
+
+# Cached Earth Engine layers
+cache/

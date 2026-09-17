@@ -2,6 +2,13 @@
 
 2026-09-17 · how `guiat/fetch-data` fits with the LANDFIRE work, the severity work now on `main`, and the agent/UI. No code changes yet.
 
+> **Status, 2026-09-17:** the cache is now implemented on `feature/fire-agent-phase0`, taking the
+> design from `guiat/fetch-data` (`firesim/cache.py`, `pyroSim fetch`, `--cache-dir`,
+> `prepare_area`/`cache_status` tools, Prepare button and cache panel in the app). The key
+> includes `fuel_source` and the LANDFIRE version (section 4b), and weather keys exclude fuels
+> entirely. What remains is upstream reconciliation: merging PR #1, aligning severity with
+> `ceeb42e`, and deciding whether this implementation or `guiat/fetch-data` becomes the shared one.
+
 ## 1. What is actually on the repo
 
 There is **no open PR for the cache** — only PR #1 (LANDFIRE, still open). The cache work is a pushed branch, and a second piece of work already landed on `main`:

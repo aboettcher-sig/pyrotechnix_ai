@@ -15,6 +15,11 @@ burns (0 at the ignition cell, -999 where it never burns).
 
 `--summary-json PATH` also writes a machine-readable run summary (for agents and scripts), and
 `--mock` swaps the real simulation for a fast synthetic one with the same outputs.
+
+`--cache-dir DIR` reuses fetched Earth Engine layers across runs: static layers (terrain, fuels,
+canopy, water) are keyed by area and fuel source, weather by area plus date and backend. So a new
+ignition point in the same area and date needs no download at all. `pyroSim fetch` warms that
+cache without running the engine.
 """
 
 import argparse
@@ -24,9 +29,9 @@ import pathlib
 import sys
 
 from . import mock, raster
+from .cache import DataStore
 from .config import SimulationConfig
-from .gee import initialize_ee
-from .model import run_simulation
+from .model import fetch_layers, run_simulation
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -37,51 +42,26 @@ def _build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     run_parser = subparsers.add_parser("run", help="Run one simulation and save a GeoTIFF.")
-    run_parser.add_argument(
-        "--aoi-bounds",
-        type=float,
-        nargs=4,
-        required=True,
-        metavar=("WEST", "SOUTH", "EAST", "NORTH"),
-        help="Area of interest as lon/lat: west south east north.",
-    )
-    run_parser.add_argument(
-        "--ignition-lonlat",
-        type=float,
-        nargs=2,
-        required=True,
-        metavar=("LON", "LAT"),
-        help="Ignition point as lon lat (must fall inside the AOI).",
-    )
-    run_parser.add_argument(
-        "--ignition-date",
-        required=True,
-        metavar="YYYY-MM-DD",
-        help="Date the fire departs.",
-    )
-    run_parser.add_argument(
-        "--projection-days",
-        type=int,
-        required=True,
-        help="Projection horizon in days.",
-    )
-    run_parser.add_argument(
-        "--weather-source",
-        default="gridmet",
-        choices=["gridmet", "weathernext"],
-        help="Weather backend (default: gridmet).",
-    )
+    fetch_parser = subparsers.add_parser(
+        "fetch", help="Download an area's layers into the cache without running the engine.")
+    fetch_parser.add_argument("--static-only", action="store_true",
+                              help="Fetch only the date-independent layers (terrain, fuels, canopy).")
+    fetch_parser.set_defaults(func=_cmd_fetch)
+    for sub in (run_parser, fetch_parser):
+        sub.add_argument(
+            "--cache-dir",
+            help="Directory for cached layers, reused across runs on the same area/date.",
+        )
+    _add_scenario_args(run_parser)
+    _add_scenario_args(fetch_parser)
+    run_parser.add_argument("--ignition-lonlat", type=float, nargs=2, required=True,
+                            metavar=("LON", "LAT"),
+                            help="Ignition point as lon lat (must fall inside the AOI).")
     run_parser.add_argument(
         "--output-name",
         "-o",
         required=True,
         help="Output GeoTIFF filename (a .tif extension is added if missing).",
-    )
-    run_parser.add_argument(
-        "--fuel-source",
-        default="landfire",
-        choices=["landfire", "nlcd"],
-        help="Fuels: landfire (LANDFIRE 2023 FBFM40 + canopy, default) or nlcd (land-cover crosswalk).",
     )
     run_parser.add_argument(
         "--no-crown-fire",
@@ -103,6 +83,56 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_scenario_args(sub) -> None:
+    """Area/date/weather/fuel arguments shared by `run` and `fetch`."""
+    sub.add_argument("--aoi-bounds", type=float, nargs=4, required=True,
+                     metavar=("WEST", "SOUTH", "EAST", "NORTH"),
+                     help="Area of interest as lon/lat: west south east north.")
+    sub.add_argument("--ignition-date", required=True, metavar="YYYY-MM-DD",
+                     help="Date the fire departs.")
+    sub.add_argument("--projection-days", type=int, required=True, help="Projection horizon in days.")
+    sub.add_argument("--weather-source", default="gridmet", choices=["gridmet", "weathernext"],
+                     help="Weather backend (default: gridmet).")
+    sub.add_argument("--fuel-source", default="landfire", choices=["landfire", "nlcd"],
+                     help="Fuels: landfire (LANDFIRE 2023 FBFM40 + canopy, default) or nlcd.")
+
+
+def _config_from(args, **overrides) -> SimulationConfig:
+    return SimulationConfig(
+        aoi_bounds=tuple(args.aoi_bounds),
+        ignition_date=args.ignition_date,
+        projection_days=args.projection_days,
+        weather_source=args.weather_source,
+        fuel_source=args.fuel_source,
+        cache_dir=args.cache_dir,
+        **overrides,
+    )
+
+
+def _cmd_fetch(args: argparse.Namespace) -> int:
+    """Warm the cache for an area/date so later runs skip the download."""
+    if not args.cache_dir:
+        raise ValueError("fetch requires --cache-dir.")
+    _validate_scenario(tuple(args.aoi_bounds), None, args.ignition_date, args.projection_days)
+    config = _config_from(args, ignition_lonlat=(0.0, 0.0))
+    store = DataStore(config.cache_dir)
+    print(f"Fetching layers into {config.cache_dir}...")
+    if args.static_only:
+        from .gee import aoi_geometry, compute_scale, initialize_ee
+        from .model import fetch_static
+        initialize_ee(config.ee_project)
+        scale = compute_scale(config.aoi_bounds, config.max_pixels, config.min_scale_m)
+        store.save_static(config, fetch_static(config, aoi_geometry(config.aoi_bounds), scale))
+        print("Cached static layers (terrain, fuels, canopy, water).")
+    else:
+        _, _, info = fetch_layers(config, store)
+        print(f"Cached static={info['static']} weather={info['weather']} in {info['fetch_seconds']}s.")
+    usage = store.usage()
+    print(f"Cache: {usage['static']} static + {usage['weather']} weather entries, "
+          f"{usage['megabytes']} MB at {usage['path']}")
+    return 0
+
+
 def _resolve_output_path(output_name: str) -> pathlib.Path:
     path = pathlib.Path(output_name).expanduser()
     if path.suffix.lower() not in (".tif", ".tiff"):
@@ -115,9 +145,10 @@ def _validate_scenario(aoi_bounds, ignition_lonlat, ignition_date, projection_da
     west, south, east, north = aoi_bounds
     if west >= east or south >= north:
         raise ValueError("aoi-bounds must be ordered as west south east north with west<east, south<north.")
-    lon, lat = ignition_lonlat
-    if not (west <= lon <= east and south <= lat <= north):
-        raise ValueError("ignition-lonlat must fall inside the AOI bounds.")
+    if ignition_lonlat is not None:
+        lon, lat = ignition_lonlat
+        if not (west <= lon <= east and south <= lat <= north):
+            raise ValueError("ignition-lonlat must fall inside the AOI bounds.")
     try:
         datetime.date.fromisoformat(ignition_date)
     except ValueError:
@@ -141,6 +172,7 @@ def _write_summary(path, config, results, output_path, is_mock) -> None:
             "crown_fire": config.enable_crown_fire,
         },
         "weather_source_used": meta["weather_source"],
+        "cache": meta.get("cache", {}),
         "fuel_source_used": meta.get("fuel_source", config.fuel_source),
         "stats": results["stats"],
         "grid": {
@@ -162,25 +194,16 @@ def _cmd_run(args: argparse.Namespace) -> int:
     _validate_scenario(aoi_bounds, ignition_lonlat, args.ignition_date, args.projection_days)
     output_path = _resolve_output_path(args.output_name)
 
-    config = SimulationConfig(
-        aoi_bounds=aoi_bounds,
-        ignition_lonlat=ignition_lonlat,
-        ignition_date=args.ignition_date,
-        projection_days=args.projection_days,
-        weather_source=args.weather_source,
-        fuel_source=args.fuel_source,
-        enable_crown_fire=not args.no_crown_fire,
-    )
+    config = _config_from(args, ignition_lonlat=ignition_lonlat,
+                          enable_crown_fire=not args.no_crown_fire)
 
     if args.mock:
         print("Running MOCK simulation (synthetic spread, no Earth Engine)...")
-        results = mock.run_simulation(config)
+        results = mock.run_simulation(config)  # nothing is fetched, so the cache is bypassed
     else:
-        print(f"Initializing Earth Engine (project: {config.ee_project or 'unset'})...")
-        initialize_ee(config.ee_project)
-
-        print("Running simulation...")
-        results = run_simulation(config)
+        store = DataStore(config.cache_dir) if config.cache_dir else None
+        print("Running simulation..." + (f" (cache: {config.cache_dir})" if store else ""))
+        results = run_simulation(config, store)
 
     saved = raster.write_geotiff(results, config, output_path)
     if args.summary_json:
@@ -197,6 +220,10 @@ def _cmd_run(args: argparse.Namespace) -> int:
         f"crown cells: {stats.get('passive_crown_cells', 0) + stats.get('active_crown_cells', 0)} | "
         f"stop: {stats['stop_condition']}"
     )
+    cache = results["meta"].get("cache") or {}
+    if cache.get("cache_dir"):
+        print(f"Cache: static={cache['static']} weather={cache['weather']} | "
+              f"fetch {cache.get('fetch_seconds', 0)}s | engine {cache.get('engine_seconds', 0)}s")
     return 0
 
 

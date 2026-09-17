@@ -11,6 +11,7 @@ import asyncio
 import math
 import os
 import queue
+import shutil
 import sys
 import threading
 from pathlib import Path
@@ -40,6 +41,8 @@ TOOL_LABELS = {
     "list_runs": "Listing runs",
     "compare_runs": "Comparing runs",
     "show_map": "Drawing map",
+    "prepare_area": "Preparing the area (downloading layers)",
+    "cache_status": "Checking the cache",
 }
 
 st.set_page_config(page_title="pyroSim", page_icon="🔥", layout="wide",
@@ -270,6 +273,16 @@ def sidebar():
                 st.session_state.pop(key, None)
             st.rerun()
 
+        with st.expander("Data cache"):
+            usage = tools.cache_status()
+            st.caption(f"{usage['static']} area(s) + {usage['weather']} weather set(s) · "
+                       f"{usage['megabytes']} MB")
+            st.text_input("Prepare: date", "2024-07-03", key="prepare_date")
+            st.number_input("Prepare: days", 1, 15, 5, key="prepare_days")
+            if st.button("Clear cache", use_container_width=True):
+                shutil.rmtree(tools.CACHE_DIR, ignore_errors=True)
+                st.rerun()
+
         with st.expander("Run without the agent"):
             areas = tools.list_example_areas()["areas"]
             with st.form("manual_run"):
@@ -429,9 +442,19 @@ def map_panel():
     if st.session_state.get("drawn_aoi"):
         aoi = st.session_state.drawn_aoi
         width_km, height_km = bounds_km(aoi)
-        cols = st.columns([3, 1, 1, 1])
+        cols = st.columns([3, 1, 1, 1, 1])
         cols[0].caption(f"▭ Drawn area: {width_km:.0f} × {height_km:.0f} km "
                         f"({aoi[0]:.3f}, {aoi[1]:.3f}) → ({aoi[2]:.3f}, {aoi[3]:.3f}) — the agent uses this")
+        if cols[4].button("Prepare", use_container_width=True,
+                          help="Download this area's layers once so later runs take seconds"):
+            with st.spinner("Downloading layers for this area…"):
+                result = tools.prepare_area(*aoi, st.session_state.get("prepare_date", "2024-07-03"),
+                                            int(st.session_state.get("prepare_days", 5)))
+            if result["status"] == "done":
+                st.success(f"Area prepared in {result.get('seconds', 0)} s — runs here are now fast."
+                           if "seconds" in result else result.get("note", "Nothing to prepare."))
+            else:
+                st.error(result["error"])
         if cols[1].button("Grow 1.5×", use_container_width=True):
             st.session_state.drawn_aoi = grow_bounds(aoi, 1.5)
             st.rerun()
@@ -473,6 +496,11 @@ def map_panel():
                               f"{summary.get('active_crown_cells', 0):,} active" if crown else None,
                               delta_color="off")
             metrics[4].metric("Cell size", f"{summary['cell_size_m']:.0f} m")
+            cache = record.get("cache") or {}
+            if cache.get("cache_dir"):
+                hits = [group for group in ("static", "weather") if cache.get(group) == "hit"]
+                st.caption(("⚡ " + " + ".join(hits) + " reused from cache · " if hits else "") +
+                           f"fetch {cache.get('fetch_seconds', 0)}s · engine {cache.get('engine_seconds', 0)}s")
             if (record.get("edge") or {}).get("reached_area_edge"):
                 st.warning("Fire reached the edge of the area — burned area is an underestimate. "
                            "Draw a bigger area, or use Grow 2×, and rerun.", icon="⚠️")
