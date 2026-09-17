@@ -33,6 +33,30 @@ def _mask_uri(mask: np.ndarray, color=(200, 30, 0), alpha=160) -> str:
     return _rgba_to_data_uri(rgba)
 
 
+# Flame-length severity classes and their map colors (see firesim/raster.py).
+SEVERITY_BREAKS_M = (1.2, 2.4, 3.4)
+SEVERITY_LABELS = ("Low (<1.2 m)", "Moderate (1.2-2.4 m)", "High (2.4-3.4 m)", "Very high (>3.4 m)")
+SEVERITY_COLORS = ("#ffffb2", "#fecc5c", "#fd8d3c", "#e31a1c")
+
+
+def _intensity_uri(fireline_intensity: np.ndarray, burned: np.ndarray) -> str:
+    """Render fireline intensity (kW/m) to an RGBA PNG on a log-scaled magma colormap."""
+    values = np.where(burned, np.clip(fireline_intensity, 1.0, None), 1.0)
+    norm = colors.LogNorm(vmin=1.0, vmax=max(float(np.nanmax(values)), 10.0))
+    rgba = colormaps["magma"](norm(values))
+    rgba[..., 3] = np.where(burned, 0.85, 0.0)
+    return _rgba_to_data_uri((rgba * 255).astype("uint8"))
+
+
+def _severity_uri(flame_length: np.ndarray, burned: np.ndarray) -> str:
+    """Render flame-length severity classes (1-4) to an RGBA PNG with discrete colors."""
+    classes = np.digitize(flame_length, SEVERITY_BREAKS_M)  # 0..3
+    palette = np.array([colors.to_rgba(c) for c in SEVERITY_COLORS])
+    rgba = palette[np.clip(classes, 0, 3)]
+    rgba[..., 3] = np.where(burned, 0.85, 0.0)
+    return _rgba_to_data_uri((rgba * 255).astype("uint8"))
+
+
 ESRI_WORLD_IMAGERY = (
     "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"
 )
@@ -73,6 +97,22 @@ def build_map(config, results, save_html=None) -> folium.Map:
         bounds=bounds,
         opacity=0.8,
         name="Time of arrival (days)",
+    ).add_to(fmap)
+
+    burned = results["matrices"]["fire_type"] > 0
+    folium.raster_layers.ImageOverlay(
+        image=_intensity_uri(results["matrices"]["fireline_intensity"], burned),
+        bounds=bounds,
+        opacity=0.85,
+        name="Fireline intensity (kW/m)",
+        show=False,
+    ).add_to(fmap)
+    folium.raster_layers.ImageOverlay(
+        image=_severity_uri(results["matrices"]["flame_length"], burned),
+        bounds=bounds,
+        opacity=0.85,
+        name="Flame-length severity class",
+        show=False,
     ).add_to(fmap)
 
     for day in range(1, config.projection_days + 1):
@@ -120,6 +160,34 @@ def plot_charts(config, results):
                     s=3, alpha=0.3, color="teal")
     axes[2].set(xlabel="Arrival time (days)", ylabel="Spread rate (m/min)",
                 title="Spread rate over time")
+
+    fig.tight_layout()
+    return fig
+
+
+def plot_intensity_severity(config, results):
+    """Charts: fireline-intensity distribution and burned-area by severity class."""
+    matrices = results["matrices"]
+    burned = matrices["fire_type"] > 0
+    scale = results["meta"]["scale"]
+    cell_ha = (scale * scale) / 1e4
+
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4))
+
+    intensity = matrices["fireline_intensity"][burned]
+    intensity = intensity[np.isfinite(intensity) & (intensity > 0)]
+    if intensity.size:
+        axes[0].hist(intensity, bins=30, color="#b30000")
+    axes[0].set(xlabel="Fireline intensity (kW/m)", ylabel="Cells",
+                title="Fireline intensity distribution")
+
+    flame = matrices["flame_length"][burned]
+    classes = np.digitize(flame, SEVERITY_BREAKS_M)  # 0..3
+    areas = [np.count_nonzero(classes == i) * cell_ha for i in range(4)]
+    axes[1].bar(range(4), areas, color=SEVERITY_COLORS)
+    axes[1].set_xticks(range(4))
+    axes[1].set_xticklabels(SEVERITY_LABELS, rotation=20, ha="right", fontsize=8)
+    axes[1].set(ylabel="Burned area (ha)", title="Burned area by severity class")
 
     fig.tight_layout()
     return fig

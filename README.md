@@ -52,7 +52,9 @@ pyroSim run \
   --ignition-date 2026-09-10 \
   --projection-days 5 \
   --weather-source weathernext \
-  --output-name tahoe_fire.tif
+  --output-name tahoe_fire.tif \
+  --intensity \
+  --severity
 ```
 
 If you used the pip venv, activate it first (`source .venv/bin/activate`). With uv you can also
@@ -69,15 +71,38 @@ run it via `uv run pyroSim run ...` or `.venv/bin/pyroSim run ...`. The equivale
 | `--projection-days N` | yes | Projection horizon in days. |
 | `--weather-source {gridmet,weathernext}` | no | Weather backend (default: `gridmet`). |
 | `--output-name NAME`, `-o NAME` | yes | Output GeoTIFF filename (a `.tif` extension is added if missing). |
+| `--intensity` | no | Also save a fireline-intensity GeoTIFF as `<name>_intensity.tif`. |
+| `--severity` | no | Also save a flame-length severity-class GeoTIFF as `<name>_severity.tif`. |
 
 Run `pyroSim run --help` for the full reference.
 
-## Output
+## Outputs
 
-A single-band GeoTIFF (`EPSG:4326`) named after `--output-name`:
+All products are single-band GeoTIFFs (`EPSG:4326`) sharing the same AOI grid.
+
+### Hours before burn — `<name>.tif` (always)
 
 - **Pixel value** = hours between ignition and when the cell burns.
 - **`0`** = the ignition cell.
 - A cell that burns two weather cycles later = `2 × weather step` hours (e.g. 12 h for a
   6‑hourly WeatherNext step, 48 h for daily GRIDMET).
 - **`-999`** = cells that never burn (including masked water); this is the nodata value.
+
+### Fireline intensity — `<name>_intensity.tif` (with `--intensity`)
+
+- **Pixel value** = Byram's fireline intensity in **kW/m** for each burned cell.
+- **`-999`** = cells that never burn (nodata).
+
+### Severity class — `<name>_severity.tif` (with `--severity`)
+
+Modeled fire-behavior severity from flame-length classes (Fire Characteristics Chart), **not**
+satellite burn severity (dNBR). Since the MVP is surface-fire only, values reflect surface
+intensity.
+
+| Value | Class | Flame length |
+| --- | --- | --- |
+| `0` | Unburned (nodata) | — |
+| `1` | Low | < 1.2 m |
+| `2` | Moderate | 1.2–2.4 m |
+| `3` | High | 2.4–3.4 m |
+| `4` | Very high | > 3.4 m |

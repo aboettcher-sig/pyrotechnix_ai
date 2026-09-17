@@ -11,7 +11,8 @@ Usage::
         --output-name tahoe_fire.tif
 
 Saves a single EPSG:4326 GeoTIFF where each pixel is the number of hours before that cell
-burns (0 at the ignition cell, -999 where it never burns).
+burns (0 at the ignition cell, -999 where it never burns). Optionally also saves sibling
+intensity (kW/m) and flame-length severity-class GeoTIFFs.
 """
 
 import argparse
@@ -72,8 +73,23 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Output GeoTIFF filename (a .tif extension is added if missing).",
     )
+    run_parser.add_argument(
+        "--intensity",
+        action="store_true",
+        help="Also save a fireline-intensity (kW/m) GeoTIFF as <name>_intensity.tif.",
+    )
+    run_parser.add_argument(
+        "--severity",
+        action="store_true",
+        help="Also save a flame-length severity-class GeoTIFF as <name>_severity.tif.",
+    )
     run_parser.set_defaults(func=_cmd_run)
     return parser
+
+
+def _sibling_path(output_path: pathlib.Path, suffix: str) -> pathlib.Path:
+    """Build a sibling GeoTIFF path like `<stem>_<suffix>.tif` next to the hours output."""
+    return output_path.with_name(f"{output_path.stem}_{suffix}.tif")
 
 
 def _resolve_output_path(output_name: str) -> pathlib.Path:
@@ -116,12 +132,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
     results = run_simulation(config)
 
     saved = raster.write_geotiff(results, config, output_path)
+    print(f"Saved hours GeoTIFF: {saved}")
+    if args.intensity:
+        intensity_path = raster.write_intensity_geotiff(results, config, _sibling_path(output_path, "intensity"))
+        print(f"Saved intensity GeoTIFF: {intensity_path}")
+    if args.severity:
+        severity_path = raster.write_severity_geotiff(results, config, _sibling_path(output_path, "severity"))
+        print(f"Saved severity GeoTIFF: {severity_path}")
 
     stats = results["stats"]
-    print(f"Saved GeoTIFF: {saved}")
     print(
         f"Burned cells: {stats['burned_cells']} "
         f"({stats['burned_hectares']:.1f} ha) | "
+        f"max fireline intensity: {stats['max_fireline_intensity_kw_m']:.0f} kW/m | "
         f"cell size: {stats['cell_size_m']:.0f} m | "
         f"weather: {results['meta']['weather_source']} | "
         f"stop: {stats['stop_condition']}"
