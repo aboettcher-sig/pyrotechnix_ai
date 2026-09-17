@@ -340,7 +340,7 @@ def full_map_html(run_ids: tuple, fire: str, max_hours: int) -> str:
                                  standalone=True).get_root().render()
 
 
-def base_map(bounds=None, observed=None, show_bounds=False):
+def base_map(bounds=None, observed=None, show_bounds=False, classified=None):
     """Imagery map framed on an area.
 
     show_bounds stays False for an example fire: drawing its extent would look like an area of
@@ -356,6 +356,8 @@ def base_map(bounds=None, observed=None, show_bounds=False):
         folium.Rectangle([[south, west], [north, east]], color="#3388ff", fill=False, weight=2,
                          tooltip="Area of interest").add_to(fmap)
     maps.add_observed_layer(fmap, observed)
+    for overlay in classified or []:
+        maps.add_classified_layer(fmap, overlay)
     folium.LayerControl(collapsed=False).add_to(fmap)
     fmap.fit_bounds([[south, west], [north, east]])
     return fmap
@@ -387,6 +389,15 @@ def example_fire_panel():
         f"Suggested ignition {fire['ignition_lonlat'][1]:.4f}, {fire['ignition_lonlat'][0]:.4f}."
     )
     overlay = cols[1].checkbox("Overlay observed perimeters", value=True, key="overlay_observed")
+    available = maps.classified_overlays(chosen)
+    if available:
+        names = {o["kind"]: o["name"] for o in available}
+        chosen_kinds = st.multiselect(
+            "Effects overlays", list(names), key="classified_overlays",
+            format_func=lambda k: names[k], placeholder="Add a classified layer, e.g. Good wildfire…")
+        st.session_state.active_overlays = [o for o in available if o["kind"] in chosen_kinds]
+    else:
+        st.session_state.active_overlays = []
     if fire["first_acres"] > 1000:
         st.caption(f"⚠️ The first mapped perimeter is already {fire['first_acres']:,} ac, so a run from a "
                    "single ignition point is not directly comparable.")
@@ -413,10 +424,11 @@ def map_panel():
         until = controls[0].slider("Hours after ignition", 0, max_hours, max_hours, step=1)
         show_all = controls[1].checkbox("All layers", value=False, help="Show every run at once")
         fmap = maps.build_folium_map(records, max_hours, until_hours=until, show_all=show_all,
-                                     observed=observed_features)
+                                     observed=observed_features,
+                                     classified=st.session_state.get("active_overlays"))
     else:
         bounds = tools.list_example_fires()["fires"][fire]["aoi_bounds"] if fire else None
-        fmap = base_map(bounds, observed_features)
+        fmap = base_map(bounds, observed_features, classified=st.session_state.get("active_overlays"))
     if st.session_state.picked:
         lat, lon = st.session_state.picked
         folium.Marker([lat, lon], tooltip="Picked ignition", icon=folium.Icon(color="orange", icon="crosshairs",
@@ -478,6 +490,40 @@ def map_panel():
         if cols[3].button("Clear area", use_container_width=True):
             st.session_state.drawn_aoi = None
             st.rerun()
+
+    for overlay in st.session_state.get("active_overlays") or []:
+        if records:
+            with st.expander(f"{overlay['name']} × simulated fire", expanded=True):
+                for record in records:
+                    result = tools.classified_breakdown(record["run_id"], overlay["fire"],
+                                                        overlay["kind"], int(until))
+                    if result["status"] != "done":
+                        st.caption(result["error"])
+                        continue
+                    st.markdown(f"**{record.get('label') or record['run_id']}** — "
+                                f"{result['burned_hectares']:,.0f} ha burned"
+                                + (f", by hour {int(until)}" if until < max_hours else ""))
+                    st.table([{
+                        "Class": f"{row['value']} {row['label']}",
+                        "Burned (ha)": f"{row['burned_hectares']:,.0f}",
+                        "Share of fire": f"{row['fraction_of_fire']:.0%}",
+                        "Flame length": ", ".join(f"{b['band']} {b['fraction']:.0%}"
+                                                  for b in row["flame_length_mix"]) or "—",
+                    } for row in result["classes"]])
+                st.caption("Rows include the unclassified share, so they add up to the whole "
+                           "simulated fire. Toggle “… ∩ " + overlay["name"] + "” on the map to see "
+                           "where. Classes are reported as supplied, not grouped.")
+        with st.expander(f"{overlay['name']} — classes (toggle the layer in the map's layer control)",
+                         expanded=not records):
+            for item in overlay["legend"]:
+                swatch, text = st.columns([1, 20])
+                swatch.markdown(
+                    f"<div style='width:14px;height:14px;background:{item['color']};"
+                    f"border:1px solid #888;border-radius:2px;margin-top:4px'></div>",
+                    unsafe_allow_html=True)
+                text.markdown(f"**{item['value']}** {item['label']} — {item['hectares']:,} ha")
+            st.caption(f"Source: {overlay['source']} · classes 1-5 as supplied; 0 is unclassified "
+                       "and drawn transparent.")
 
     point = (clicked or {}).get("last_clicked")
     if point and st.session_state.get("last_click_seen") != point:

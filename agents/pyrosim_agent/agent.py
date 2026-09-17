@@ -29,6 +29,7 @@ root_agent = llm_agent.Agent(
         tools.list_runs,
         tools.compare_runs,
         tools.severity_summary,
+        tools.classified_breakdown,
         tools.show_map,
     ],
 )

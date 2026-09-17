@@ -27,7 +27,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:  # firesim lives at the repo root, next to agents/
     sys.path.insert(0, str(REPO_ROOT))
 
-from firesim import observed as observed_fires, severity  # noqa: E402
+from firesim import observed as observed_fires, overlays as fire_overlays, severity  # noqa: E402
 
 NODATA = -999.0
 CMAP = "YlOrRd_r"  # early arrival = dark red, late arrival = pale yellow
@@ -197,11 +197,12 @@ def _exterior_rings(geometry):
 # --- Interactive HTML ---
 
 def build_folium_map(runs, max_hours, until_hours=None, show_all=False, height=None, observed=None,
-                     standalone=False):
+                     standalone=False, classified=None):
     """Folium map with one toggleable arrival-time layer per run.
 
     until_hours: only draw cells that have burned by this many hours after ignition (time slider).
     show_all: show every run layer at once instead of only the first.
+    classified: classified overlays (firesim.overlays.load) drawn as toggleable layers.
     standalone: build a self-contained map for saving as HTML — embeds the imagery as an image
         instead of tiles (tile servers refuse requests from file:// pages), and adds the
         severity layer, day-by-day fronts and a summary panel.
@@ -252,8 +253,12 @@ def build_folium_map(runs, max_hours, until_hours=None, show_all=False, height=N
             _add_severity_layer(fmap, run, label)
 
     add_observed_layer(fmap, observed, until_hours)
+    for overlay in classified or []:
+        add_classified_layer(fmap, overlay)
+        for run in runs:
+            add_burn_intersection_layer(fmap, run, overlay, until_hours)
     if standalone:
-        _add_summary_panel(fmap, runs, observed)
+        _add_summary_panel(fmap, runs, observed, classified)
 
     legend = branca.colormap.LinearColormap(
         [colors.to_hex(cmap(v)) for v in np.linspace(0, 1, 8)], vmin=0, vmax=max_hours,
@@ -268,6 +273,46 @@ def build_folium_map(runs, max_hours, until_hours=None, show_all=False, height=N
 def observed_features(fire: str) -> list[dict]:
     """Observed perimeters of an example fire, ready for the map overlays."""
     return observed_fires.perimeter_features(fire)
+
+
+def classified_overlays(fire: str) -> list[dict]:
+    """Classified effects overlays shipped with an example fire (good wildfire, ...)."""
+    return [fire_overlays.load(fire, kind) for kind in fire_overlays.available(fire)]
+
+
+def add_classified_layer(fmap, overlay) -> None:
+    """One toggleable layer per classified raster, off by default, with its own colours."""
+    if not overlay:
+        return
+    west, south, east, north = overlay["bounds"]
+    group = folium.FeatureGroup(name=f"{overlay['name']} (classified)", show=False)
+    folium.raster_layers.ImageOverlay(
+        image=overlay["rgba"], bounds=[[south, west], [north, east]], mercator_project=True,
+    ).add_to(group)
+    group.add_to(fmap)
+
+
+def add_burn_intersection_layer(fmap, run, overlay, until_hours=None) -> None:
+    """Only the burned cells, coloured by the overlay's class (the intersection layer)."""
+    if not overlay:
+        return
+    hours = read_hours(run["output_path"])
+    burned = np.isfinite(hours) if until_hours is None else (np.isfinite(hours) & (hours <= until_hours))
+    west, south, east, north = run["scenario"]["aoi_bounds"]
+    classes = fire_overlays.classes_on_grid(overlay["fire"], overlay["kind"],
+                                            (west, south, east, north), hours.shape)
+    if classes is None:
+        return
+    rgba = np.zeros((*hours.shape, 4), dtype="uint8")
+    for item in overlay["legend"]:
+        red, green, blue = (int(item["color"][i:i + 2], 16) for i in (1, 3, 5))
+        mask = burned & (classes == item["value"])
+        rgba[mask] = (red, green, blue, 230)
+    label = run.get("label") or run["run_id"]
+    group = folium.FeatureGroup(name=f"{label} ∩ {overlay['name']}", show=False)
+    folium.raster_layers.ImageOverlay(image=rgba, bounds=[[south, west], [north, east]],
+                                      mercator_project=True).add_to(group)
+    group.add_to(fmap)
 
 
 def add_observed_layer(fmap, observed, until_hours=None) -> None:
@@ -358,9 +403,10 @@ def _add_severity_layer(fmap, run, label) -> None:
     group.add_to(fmap)
 
 
-def _add_summary_panel(fmap, runs, observed=None) -> None:
-    """Fixed panel with headline numbers, flame-length bands and provenance."""
+def _add_summary_panel(fmap, runs, observed=None, classified=None) -> None:
+    """Fixed panel with headline numbers, flame-length bands, overlay legends and provenance."""
     blocks = []
+    _panel_overlays = [o for o in (classified or []) if o]
     for run in runs:
         summary = run.get("summary", {})
         scenario = run["scenario"]
@@ -383,6 +429,13 @@ def _add_summary_panel(fmap, runs, observed=None) -> None:
             f"{run.get('weather_source_used')} · fuels {run.get('fuel_source_used', '-')} · "
             f"{summary.get('cell_size_m', 0):.0f} m cells<br>{run['run_id']}</span></div>"
         )
+    for overlay in _panel_overlays:
+        rows = "".join(
+            f"<div><span style='display:inline-block;width:11px;height:11px;background:{item['color']};"
+            f"margin-right:5px'></span>{item['label']} ({item['hectares']:,} ha)</div>"
+            for item in overlay["legend"])
+        blocks.append(f"<div style='border-top:1px solid #ccc;padding-top:5px'>"
+                      f"<b>{overlay['name']}</b> (toggle in the layer control)<br>{rows}</div>")
     if observed:
         blocks.append(
             f"<div style='border-top:1px solid #ccc;padding-top:5px'><b>Observed</b><br>"
@@ -399,7 +452,8 @@ def _add_summary_panel(fmap, runs, observed=None) -> None:
     fmap.get_root().html.add_child(folium.Element(html))
 
 
-def render_html(runs, path, max_hours, observed=None):
+def render_html(runs, path, max_hours, observed=None, classified=None):
     """Save a self-contained interactive map: embedded imagery, arrival time, daily fronts,
-    flame-length bands, observed perimeters by day, and a summary panel."""
-    build_folium_map(runs, max_hours, observed=observed, standalone=True).save(str(path))
+    flame-length bands, observed perimeters by day, classified overlays, and a summary panel."""
+    build_folium_map(runs, max_hours, observed=observed, standalone=True,
+                     classified=classified).save(str(path))

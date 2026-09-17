@@ -31,7 +31,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 if str(REPO_ROOT) not in sys.path:  # firesim lives at the repo root, next to agents/
     sys.path.insert(0, str(REPO_ROOT))
 
-from firesim import observed  # noqa: E402
+from firesim import observed, overlays as fire_overlays  # noqa: E402
 
 RUNS_DIR = Path(os.environ.get("PYROSIM_RUNS_DIR", REPO_ROOT / "runs"))
 CACHE_DIR = Path(os.environ.get("PYROSIM_CACHE_DIR", REPO_ROOT / "cache"))
@@ -356,6 +356,53 @@ def cache_status() -> dict:
     return {"status": "done", **DataStore(CACHE_DIR).usage()}
 
 
+def classified_breakdown(run_id: str, fire: str, kind: str = "good_fire",
+                         until_hours: int = 0) -> dict:
+    """How a simulated fire falls across a classified effects layer, class by class.
+
+    Crosses the run's burned area with the layer shipped for that example fire (e.g. the good
+    wildfire classes 1-5), and reports burned hectares, the share of the fire, and the
+    flame-length mix inside each class. Always includes an "unclassified" row, because these
+    layers cover only part of the map — the rows add up to the whole simulated fire.
+
+    Args:
+        run_id: a finished run.
+        fire: example fire whose layer to use, from list_example_fires.
+        kind: which layer, e.g. "good_fire".
+        until_hours: only count what had burned by this many hours after ignition (0 = whole run).
+
+    Report the classes as the layer's authors named them; do not group them into good and bad.
+    """
+    record = _load_record(run_id)
+    if record is None or record.get("status") != "done":
+        return {"status": "error", "error": f"No finished run with id {run_id!r}."}
+    if kind not in fire_overlays.available(fire):
+        return {"status": "error",
+                "error": f"{fire!r} has no {kind!r} layer (has: {fire_overlays.available(fire) or 'none'})."}
+
+    with rasterio.open(record["output_path"]) as dataset:
+        hours = dataset.read(1)
+        flame = dataset.read(dataset.descriptions.index("flame_length_m") + 1) \
+            if "flame_length_m" in (dataset.descriptions or ()) else np.zeros_like(hours)
+    burned = hours != NODATA
+    if until_hours:
+        burned &= hours <= until_hours
+    classes = fire_overlays.classes_on_grid(fire, kind, record["scenario"]["aoi_bounds"], hours.shape)
+    cell_area_ha = record["summary"]["cell_size_m"] ** 2 / 1e4
+    rows = fire_overlays.burn_breakdown(classes, burned, flame, cell_area_ha, kind)
+    return {
+        "status": "done",
+        "run_id": run_id,
+        "label": record.get("label", ""),
+        "mode": record.get("mode"),
+        "layer": fire_overlays.OVERLAY_TYPES[kind]["name"],
+        "fire": fire,
+        "until_hours": until_hours or None,
+        "burned_hectares": record["summary"]["burned_hectares"],
+        "classes": rows,
+    }
+
+
 def get_run(run_id: str) -> dict:
     """Return the full record of a previous run: scenario, status, summary stats and growth."""
     record = _load_record(run_id)
@@ -459,8 +506,9 @@ async def show_map(run_ids: list[str], observed_fire: str = "", tool_context: To
     max_hours = max(run["scenario"]["projection_days"] for run in runs) * 24.0
 
     features = observed.perimeter_features(observed_fire) if observed_fire else None
+    classified = maps.classified_overlays(observed_fire) if observed_fire else None
     basemap = await asyncio.to_thread(maps.render_png, runs, png_path, max_hours, features)
-    await asyncio.to_thread(maps.render_html, runs, html_path, max_hours, features)
+    await asyncio.to_thread(maps.render_html, runs, html_path, max_hours, features, classified)
 
     artifact_name = None
     if tool_context is not None:
@@ -477,5 +525,7 @@ async def show_map(run_ids: list[str], observed_fire: str = "", tool_context: To
         "html_url": html_path.resolve().as_uri(),
         "basemap": basemap,
         "observed_fire": observed_fire or None,
+        "classified_overlays": [{"name": o["name"], "classes": [c["label"] for c in o["legend"]]}
+                                for o in (classified or []) if o],
         "runs": [{"run_id": r["run_id"], "label": r.get("label", ""), "mode": r.get("mode")} for r in runs],
     }
