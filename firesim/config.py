@@ -21,6 +21,10 @@ class SimulationConfig:
     # --- Earth Engine (set EE_PROJECT in .env) ---
     ee_project: str = field(default_factory=lambda: os.environ.get("EE_PROJECT", ""), repr=False)
 
+    # --- Fuels ---
+    fuel_source: str = "landfire"             # "landfire" (LANDFIRE 2023 FBFM40 + canopy) | "nlcd"
+    enable_crown_fire: bool = True            # False zeroes canopy layers (surface fire only)
+
     # --- Weather backend ---
     weather_source: str = "gridmet"           # "gridmet" | "weathernext"
     weathernext_stat: str = "mean"            # mean | p10 | p25 | p50 | p75 | p90
@@ -41,7 +45,7 @@ class SimulationConfig:
     live_woody: float = 0.6
     foliar: float = 1.0
 
-    # --- Canopy constants (surface-fire MVP; 0 disables crown fire) ---
+    # --- Canopy constants (fuel_source="nlcd" only; 0 disables crown fire) ---
     canopy_cover: float = 0.0
     canopy_height: float = 0.0
     canopy_base_height: float = 0.0

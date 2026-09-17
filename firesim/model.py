@@ -21,15 +21,35 @@ def _crop(arr, rows, cols):
     return arr[..., :rows, :cols]
 
 
+def fetch_fuels(config, region, scale):
+    """Return (fuel_model, canopy cubes, water mask) from the configured fuel source."""
+    if config.fuel_source == "landfire":
+        raw = gee.fetch_landfire(region, scale)
+        fuel_model = raw["fuel_model"]
+        canopy = physics.landfire_to_canopy(raw)
+        water = raw["water_fraction"] > config.water_fraction_threshold
+    elif config.fuel_source == "nlcd":
+        fuel_model = physics.nlcd_to_fuel_model(gee.fetch_landcover(region, scale))
+        canopy = {
+            name: np.full(fuel_model.shape, getattr(config, name), dtype="float32")
+            for name in physics.CANOPY_LAYERS
+        }
+        water = gee.fetch_water_mask(region, scale, config.water_fraction_threshold)
+    else:
+        raise ValueError(f"Unknown fuel_source {config.fuel_source!r}; use 'landfire' or 'nlcd'.")
+
+    if not config.enable_crown_fire:
+        canopy = {name: np.zeros_like(arr) for name, arr in canopy.items()}
+    return physics.sanitize_fuel_model(fuel_model), canopy, water
+
+
 def build_inputs(config):
     """Fetch every layer from Earth Engine and wrap them as SpaceTimeCubes."""
     region = gee.aoi_geometry(config.aoi_bounds)
     scale = gee.compute_scale(config.aoi_bounds, config.max_pixels, config.min_scale_m)
 
     slope, aspect = gee.fetch_topography(region, scale)
-    landcover = gee.fetch_landcover(region, scale)
-    fuel_model = physics.nlcd_to_fuel_model(landcover)
-    water = gee.fetch_water_mask(region, scale, config.water_fraction_threshold)
+    fuel_model, canopy, water = fetch_fuels(config, region, scale)
     weather_stack = weather.get_weather(config, region, scale)
 
     # Align all layers to a common grid (downloads can differ by a pixel).
@@ -52,15 +72,11 @@ def build_inputs(config):
         "slope": _crop(slope, rows, cols),
         "aspect": _crop(aspect, rows, cols),
         "fuel_model": fuel_model,
-        "canopy_cover": const(config.canopy_cover),
-        "canopy_height": const(config.canopy_height),
-        "canopy_base_height": const(config.canopy_base_height),
-        "canopy_bulk_density": const(config.canopy_bulk_density),
         "fuel_moisture_live_herbaceous": const(config.live_herbaceous),
         "fuel_moisture_live_woody": const(config.live_woody),
         "foliar_moisture": const(config.foliar),
     }
-    for name, cube in weather_stack.cubes.items():
+    for name, cube in {**canopy, **weather_stack.cubes}.items():
         arrays[name] = _crop(cube, rows, cols)
 
     space_time_cubes = {
@@ -76,6 +92,7 @@ def build_inputs(config):
         "band_duration_min": weather_stack.band_duration_min,
         "start_minutes": weather_stack.start_minutes,
         "weather_source": weather_stack.source,
+        "fuel_source": config.fuel_source,
         "non_land_mask": non_land if config.constrain_to_land else None,
     }
     return space_time_cubes, meta
@@ -104,7 +121,8 @@ def run_simulation(config):
 
 def compute_stats(matrices, scale, result):
     """Summarize a spread result into a small dictionary of headline numbers."""
-    burned = matrices["fire_type"] > 0
+    fire_type = matrices["fire_type"]
+    burned = fire_type > 0
     n_burned = int(np.count_nonzero(burned))
     cell_ha = (scale * scale) / 1e4
     flame = matrices["flame_length"][burned]
@@ -113,6 +131,8 @@ def compute_stats(matrices, scale, result):
         "burned_cells": n_burned,
         "burned_hectares": n_burned * cell_ha,
         "burned_acres": n_burned * cell_ha * 2.47105,
+        "passive_crown_cells": int(np.count_nonzero(fire_type == 2)),
+        "active_crown_cells": int(np.count_nonzero(fire_type == 3)),
         "max_flame_length_m": float(np.nanmax(flame)) if n_burned else 0.0,
         "mean_spread_rate_m_min": float(np.nanmean(spread)) if n_burned else 0.0,
         "stop_condition": result["stop_condition"],

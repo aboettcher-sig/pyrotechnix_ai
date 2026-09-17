@@ -55,12 +55,35 @@ All raster inputs are fetched from the Google Earth Engine catalog (project set 
 | Purpose | Earth Engine source | Status |
 | --- | --- | --- |
 | Elevation → slope/aspect | `USGS/SRTMGL1_003` + `ee.Terrain` | 🟢 direct |
-| Fuel model | `USGS/NLCD_RELEASES/2019_REL/NLCD/2019` land cover → Scott & Burgan crosswalk | 🟡 processed |
-| Water/land mask | Same NLCD (classes 11, 12), aggregated as a fraction | 🟡 processed |
+| Fuel model (default) | **LANDFIRE 2023 FBFM40** `projects/sat-io/open-datasets/landfire/FUEL/FBFM40` (community catalog) | 🟢 direct |
+| Canopy cover / height / base height / bulk density | **LANDFIRE 2023** `.../FUEL/{CC,CH,CBH,CBD}` | 🟢 direct |
+| Water/land mask (default) | LANDFIRE FBFM40 codes 98 (water) + 92 (snow/ice), aggregated as a fraction | 🟡 processed |
+| Fuel model + water (`fuel_source="nlcd"`) | `USGS/NLCD_RELEASES/2019_REL/NLCD/2019` land cover → Scott & Burgan crosswalk | 🟡 processed |
 | Weather (default) | `IDAHO_EPSCOR/GRIDMET` — daily, CONUS, 1979→present, incl. `fm100` | 🟢 direct |
 | Weather (preferred) | **WeatherNext 3** `projects/gcp-public-data-weathernext/assets/weathernext_3_0_0_0p1deg` — hourly forecast | 🟢 direct |
 | Dead fuel moisture 1/10 hr | Derived (Simard EMC) from weather | 🟡 processed |
-| Live fuel moisture, canopy | Seasonal constants (MVP) | 🔴 assumption |
+| Live fuel moisture | Seasonal constants (MVP) | 🔴 assumption |
+
+---
+
+### LANDFIRE fuels (`fuel_source="landfire"`, default)
+
+`gee.fetch_landfire` reads the CONUS image of each LANDFIRE 2023 (LF 2.4.0) fuel layer, asserts
+the asset version, and aggregates the 30 m data onto the simulation grid in one download:
+
+- **FBFM40** and binned **CC**: `reduceResolution` **mode** (categorical).
+- **CH / CBH / CBD**: **mean over canopy pixels only**, so non-forest zeros don't dilute them.
+- Masked cells (outside coverage) come back as `-inf`/`-9999`; an AOI with no coverage raises.
+
+`physics.landfire_to_canopy` converts to model units (CC ÷ 100, CH ÷ 10, CBH ÷ 10, CBD ÷ 100),
+clips to documented ranges, zeroes canopy where CC = 0, and keeps CBH ≤ CH.
+`physics.sanitize_fuel_model` maps any code pyretechnics doesn't define to `99` — required,
+because pyretechnics indexes an unchecked C array by fuel code. Encodings, gotchas and citation:
+[pyretechnics_weathernext3_inputs.md §5.2](pyretechnics_weathernext3_inputs.md).
+
+Crown fire initiates (Van Wagner) only where `canopy_cover > 0.4` and surface intensity exceeds
+the critical intensity for the canopy base height. `enable_crown_fire=False` zeroes all canopy
+layers for a surface-only comparison.
 
 ---
 
@@ -92,9 +115,10 @@ Two interchangeable providers sit behind a single interface (`firesim/weather.py
 ## 5. Constraining spread to land
 
 Open water must not burn. At the coarse simulation grid, nearest-neighbor downsampling of 30 m
-NLCD can drop the water class, so a naive class lookup leaks fire across lakes. Two mitigations:
+land cover can drop the water class, so a naive class lookup leaks fire across lakes. Two mitigations:
 
-1. **Conservative detection** (`gee.fetch_water_mask`): water is aggregated to the sim resolution
+1. **Conservative detection** (`gee.fetch_landfire` from FBFM40 codes 98/92, or
+   `gee.fetch_water_mask` from NLCD 11/12): water is aggregated to the sim resolution
    as a **fraction** (`reduceResolution` mean) and thresholded (`water_fraction_threshold`,
    default 0.25), so thin shorelines are never lost.
 2. **Impervious boundary** (`landmask.buffer_mask`): the water mask is dilated by
@@ -114,7 +138,8 @@ Water cells are set to non-burnable fuel `98` and blanked in the map overlay (th
 | Temperature (°C) | Kelvin − 273.15 |
 | Relative humidity | GRIDMET `(rmin+rmax)/2`, or Magnus formula from temperature + dewpoint |
 | Dead fuel moisture | Simard (1968) equilibrium moisture content; 100 hr from `fm100` when available |
-| Fuel model | NLCD class → Scott & Burgan 40 crosswalk |
+| Fuel model | LANDFIRE FBFM40 as-is (unknown codes → 99), or NLCD class → Scott & Burgan 40 crosswalk |
+| Canopy | LANDFIRE CC ÷ 100, CH ÷ 10, CBH ÷ 10, CBD ÷ 100 |
 
 ---
 
@@ -127,7 +152,7 @@ firesim/
   __init__.py     run(config) entry point + exports
   config.py       SimulationConfig dataclass (all inputs + assumptions)
   gee.py          Earth Engine init, geometry, downloads, layer/weather fetchers
-  physics.py      unit conversions, Simard EMC, NLCD→fuel crosswalk
+  physics.py      unit conversions, Simard EMC, LANDFIRE canopy + fuel sanitizing, NLCD crosswalk
   weather.py      WeatherStack + GRIDMET / WeatherNext providers + fallback
   landmask.py     conservative water mask + impervious buffer + enforcement
   model.py        assemble SpaceTimeCubes, run pyretechnics, compute stats
@@ -137,7 +162,8 @@ notebooks/
   fire_spread_explorer_weathernext.ipynb  WeatherNext driver (thin)
 ```
 
-**Flow:** `run(config)` → `initialize_ee` → `build_inputs` (fetch topo, fuels, water, weather →
+**Flow:** `run(config)` → `initialize_ee` → `build_inputs` (fetch topo, fuels/canopy/water via
+`fetch_fuels`, weather →
 align → mask → SpaceTimeCubes) → `spread_fire_with_phi_field` → `get_full_matrices` →
 `compute_stats`. Visualization is separate (`viz.build_map`, `viz.plot_charts`).
 
@@ -145,9 +171,11 @@ align → mask → SpaceTimeCubes) → `spread_fire_with_phi_field` → `get_ful
 
 ## 8. Outputs & visualization
 
-- **Stats:** burned hectares/acres, max flame length, mean spread rate, stop condition, cell size.
+- **Stats:** burned hectares/acres, passive/active crown-fire cells, max flame length, mean spread
+  rate, stop condition, cell size.
 - **Interactive map** (`viz.build_map`): Esri **aerial imagery** basemap, AOI rectangle, ignition
-  marker, a time-of-arrival overlay colored by arrival day, and toggleable daily perimeters.
+  marker, a time-of-arrival overlay colored by arrival day, toggleable daily perimeters, and a
+  crown-fire layer (hidden by default).
 - **Charts** (`viz.plot_charts`): cumulative burned area vs time, flame-length distribution,
   spread rate vs arrival time.
 
@@ -162,6 +190,8 @@ align → mask → SpaceTimeCubes) → `spread_fire_with_phi_field` → `get_ful
 | `ignition_date` | — | "YYYY-MM-DD" |
 | `projection_days` | — | projection horizon (days) |
 | `ee_project` | `$EE_PROJECT` | Earth Engine project (read from `.env`) |
+| `fuel_source` | `landfire` | `landfire` (LANDFIRE 2023) \| `nlcd` (crosswalk, constant canopy) |
+| `enable_crown_fire` | `True` | `False` zeroes canopy layers (surface fire only) |
 | `weather_source` | `gridmet` | `gridmet` \| `weathernext` |
 | `weathernext_stat` | `mean` | ensemble statistic |
 | `weathernext_step_hours` | `6` | forecast sampling step (fewer bands = smaller download) |
@@ -174,26 +204,27 @@ align → mask → SpaceTimeCubes) → `spread_fire_with_phi_field` → `get_ful
 | `max_pixels` | `160` | longest AOI side in pixels (resolution/cost) |
 | `min_scale_m` | `30.0` | floor on cell size (m) |
 | `live_herbaceous` / `live_woody` / `foliar` | `0.9` / `0.6` / `1.0` | live fuel moisture constants |
-| `canopy_cover` / `canopy_height` / `canopy_base_height` / `canopy_bulk_density` | `0.0` | canopy constants (0 = surface fire only) |
+| `canopy_cover` / `canopy_height` / `canopy_base_height` / `canopy_bulk_density` | `0.0` | canopy constants, `fuel_source="nlcd"` only |
 
 ---
 
 ## 10. MVP scope & limitations
 
-- **Surface fire only** — canopy layers are 0, so no crown fire.
+- **LANDFIRE fuels are CONUS only** (Alaska/Hawaii images exist in other projections, not wired
+  up). Canopy detail is aggregated to the sim cell size (~100–150 m at `max_pixels=160`).
+- **No spotting**; crown fire spreads only cell to cell.
 - **Live fuel moisture** and **foliar moisture** are seasonal constants (the remaining 🔴 gap).
 - **Dead fuel moisture** is modeled from current weather (no multi-week spin-up of the 100 hr class
   in the WeatherNext path).
 - **Resolution** is coarse (grid capped by `max_pixels`); weather is far coarser than fuels/topo.
-- **US only** — relies on NLCD/GRIDMET/WeatherNext CONUS coverage.
+- **US only** — relies on LANDFIRE/NLCD/GRIDMET CONUS coverage.
 
 ---
 
 ## 11. Extension roadmap
 
-- Enable **crown fire** with LANDFIRE canopy layers (CC/CH/CBH/CBD) ingested from the LANDFIRE
-  program (not in the EE core catalog).
-- Replace fuel-model crosswalk with **LANDFIRE FBFM40** for fidelity.
+- LANDFIRE for **Alaska / Hawaii** (`region_code` `LA` / `LH`), and newer LF 2024+ releases once in
+  the catalog.
 - Source **live fuel moisture** from an LFMC product (NFMD, satellite LFMC) instead of constants.
 - Add **spotting** (firebrands) and dead-fuel-moisture **spin-up** history.
 - Higher spatial resolution and hourly weather chunk streaming for large AOIs.
@@ -202,8 +233,8 @@ align → mask → SpaceTimeCubes) → `spread_fire_with_phi_field` → `get_ful
 
 ## 12. Running it
 
-1. `.venv` with dependencies from [../requirements.txt](../requirements.txt); kernel
-   `Python (pyrotechnics-tests .venv)`. Create a `.env` with `EE_PROJECT=<your-project>`.
+1. `.venv` with dependencies from [../requirements.txt](../requirements.txt); run `jupyter lab`
+   from the activated `.venv`. Create a `.env` with `EE_PROJECT=<your-project>`.
 2. Open a notebook, edit only the scenario cell, run top to bottom.
 3. Complete the Earth Engine auth prompt for your `EE_PROJECT` on first run.
    - GRIDMET notebook for historical/near-real-time dates.
