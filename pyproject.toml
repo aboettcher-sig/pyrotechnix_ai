@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pyrotechnix-ai"
+version = "0.1.0"
+description = "US wildfire-spread simulation (pyretechnics + Earth Engine) with a CLI."
+requires-python = ">=3.10"
+dynamic = ["dependencies"]
+
+[project.scripts]
+pyroSim = "firesim.cli:main"
+
+[tool.setuptools]
+packages = ["firesim"]
+
+[tool.setuptools.dynamic]
+dependencies = { file = ["requirements.txt"] }

@@ -13,9 +13,9 @@ Typical use (from the notebook)::
 from .config import SimulationConfig
 from .gee import initialize_ee
 from .model import run_simulation
-from . import viz
+from . import raster, viz
 
-__all__ = ["SimulationConfig", "run", "viz", "initialize_ee", "run_simulation"]
+__all__ = ["SimulationConfig", "run", "viz", "raster", "initialize_ee", "run_simulation"]
 
 
 def run(config: SimulationConfig):

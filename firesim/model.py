@@ -127,6 +127,7 @@ def compute_stats(matrices, scale, result):
     cell_ha = (scale * scale) / 1e4
     flame = matrices["flame_length"][burned]
     spread = matrices["spread_rate"][burned]
+    intensity = matrices["fireline_intensity"][burned]
     return {
         "burned_cells": n_burned,
         "burned_hectares": n_burned * cell_ha,
@@ -135,6 +136,17 @@ def compute_stats(matrices, scale, result):
         "active_crown_cells": int(np.count_nonzero(fire_type == 3)),
         "max_flame_length_m": float(np.nanmax(flame)) if n_burned else 0.0,
         "mean_spread_rate_m_min": float(np.nanmean(spread)) if n_burned else 0.0,
+        "max_fireline_intensity_kw_m": float(np.nanmax(intensity)) if n_burned else 0.0,
+        "mean_fireline_intensity_kw_m": float(np.nanmean(intensity)) if n_burned else 0.0,
+        "severity_class_cells": _severity_class_counts(flame),
         "stop_condition": result["stop_condition"],
         "cell_size_m": scale,
     }
+
+
+def _severity_class_counts(flame_length):
+    """Count burned cells per flame-length severity class (1-4)."""
+    from .raster import SEVERITY_BREAKS_M
+
+    classes = np.digitize(flame_length, SEVERITY_BREAKS_M) + 1
+    return {cls: int(np.count_nonzero(classes == cls)) for cls in (1, 2, 3, 4)}
