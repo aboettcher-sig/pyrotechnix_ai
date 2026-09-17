@@ -7,7 +7,10 @@ display them — nothing here recomputes or reinterprets the classification.
 
 import numpy as np
 import rasterio
+from rasterio.enums import Resampling
+from rasterio.warp import reproject
 
+from . import severity
 from .observed import DATA_DIR
 
 MAX_OVERLAY_PIXELS = 1400  # decimate wide rasters for the web map; classes use nearest neighbour
@@ -84,3 +87,57 @@ def load(fire: str, kind: str = "good_fire", max_pixels: int = MAX_OVERLAY_PIXEL
         "legend": legend,
         "source": path.name,
     }
+
+
+def classes_on_grid(fire: str, kind: str, bounds, shape) -> np.ndarray | None:
+    """Resample a classified raster onto a run's grid (nearest neighbour — these are categories).
+
+    bounds is (west, south, east, north) and shape is (rows, cols) of the simulation grid; both
+    rasters are EPSG:4326, so this is a straight resample with no reprojection.
+    """
+    path = overlay_path(fire, kind)
+    if path is None:
+        return None
+    west, south, east, north = bounds
+    destination = np.zeros(shape, dtype="uint8")
+    transform = rasterio.transform.from_bounds(west, south, east, north, shape[1], shape[0])
+    with rasterio.open(path) as source:
+        reproject(
+            source=rasterio.band(source, 1), destination=destination,
+            src_transform=source.transform, src_crs=source.crs,
+            dst_transform=transform, dst_crs="EPSG:4326", resampling=Resampling.nearest,
+        )
+    return destination
+
+
+def burn_breakdown(classes: np.ndarray, burned: np.ndarray, flame_length_m: np.ndarray,
+                   cell_area_ha: float, kind: str = "good_fire") -> list[dict]:
+    """Burned area per class, with the flame-length mix inside each class.
+
+    Reports every class of the layer plus an "unclassified" row (value 0), so the rows always add
+    up to the simulated burned area — most of these layers are unclassified over most of the map.
+    """
+    spec = OVERLAY_TYPES[kind]
+    total_burned = int(np.count_nonzero(burned))
+    flame_ft = flame_length_m * severity.FEET_PER_METRE
+    rows = []
+    for value, (label, color) in [*spec["classes"].items(), (0, ("Unclassified", "#9e9e9e"))]:
+        in_class = burned & (classes == value)
+        cells = int(np.count_nonzero(in_class))
+        if cells == 0:
+            continue
+        bands = []
+        for lower, upper, band_name, _ in severity.FLAME_LENGTH_BANDS:
+            band_cells = int(np.count_nonzero(in_class & (flame_ft >= lower) & (flame_ft < upper)))
+            if band_cells:
+                bands.append({"band": band_name, "fraction": round(band_cells / cells, 3)})
+        rows.append({
+            "value": value,
+            "label": label,
+            "color": color,
+            "burned_hectares": round(cells * cell_area_ha, 1),
+            "burned_acres": round(cells * cell_area_ha * 2.47105, 1),
+            "fraction_of_fire": round(cells / total_burned, 3) if total_burned else 0.0,
+            "flame_length_mix": bands,
+        })
+    return rows

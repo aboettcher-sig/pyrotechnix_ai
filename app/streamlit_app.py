@@ -478,8 +478,29 @@ def map_panel():
             st.rerun()
 
     for overlay in st.session_state.get("active_overlays") or []:
+        if records:
+            with st.expander(f"{overlay['name']} × simulated fire", expanded=True):
+                for record in records:
+                    result = tools.classified_breakdown(record["run_id"], overlay["fire"],
+                                                        overlay["kind"], int(until))
+                    if result["status"] != "done":
+                        st.caption(result["error"])
+                        continue
+                    st.markdown(f"**{record.get('label') or record['run_id']}** — "
+                                f"{result['burned_hectares']:,.0f} ha burned"
+                                + (f", by hour {int(until)}" if until < max_hours else ""))
+                    st.table([{
+                        "Class": f"{row['value']} {row['label']}",
+                        "Burned (ha)": f"{row['burned_hectares']:,.0f}",
+                        "Share of fire": f"{row['fraction_of_fire']:.0%}",
+                        "Flame length": ", ".join(f"{b['band']} {b['fraction']:.0%}"
+                                                  for b in row["flame_length_mix"]) or "—",
+                    } for row in result["classes"]])
+                st.caption("Rows include the unclassified share, so they add up to the whole "
+                           "simulated fire. Toggle “… ∩ " + overlay["name"] + "” on the map to see "
+                           "where. Classes are reported as supplied, not grouped.")
         with st.expander(f"{overlay['name']} — classes (toggle the layer in the map's layer control)",
-                         expanded=True):
+                         expanded=not records):
             for item in overlay["legend"]:
                 swatch, text = st.columns([1, 20])
                 swatch.markdown(

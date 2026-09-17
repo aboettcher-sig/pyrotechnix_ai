@@ -255,6 +255,8 @@ def build_folium_map(runs, max_hours, until_hours=None, show_all=False, height=N
     add_observed_layer(fmap, observed, until_hours)
     for overlay in classified or []:
         add_classified_layer(fmap, overlay)
+        for run in runs:
+            add_burn_intersection_layer(fmap, run, overlay, until_hours)
     if standalone:
         _add_summary_panel(fmap, runs, observed, classified)
 
@@ -287,6 +289,29 @@ def add_classified_layer(fmap, overlay) -> None:
     folium.raster_layers.ImageOverlay(
         image=overlay["rgba"], bounds=[[south, west], [north, east]], mercator_project=True,
     ).add_to(group)
+    group.add_to(fmap)
+
+
+def add_burn_intersection_layer(fmap, run, overlay, until_hours=None) -> None:
+    """Only the burned cells, coloured by the overlay's class (the intersection layer)."""
+    if not overlay:
+        return
+    hours = read_hours(run["output_path"])
+    burned = np.isfinite(hours) if until_hours is None else (np.isfinite(hours) & (hours <= until_hours))
+    west, south, east, north = run["scenario"]["aoi_bounds"]
+    classes = fire_overlays.classes_on_grid(overlay["fire"], overlay["kind"],
+                                            (west, south, east, north), hours.shape)
+    if classes is None:
+        return
+    rgba = np.zeros((*hours.shape, 4), dtype="uint8")
+    for item in overlay["legend"]:
+        red, green, blue = (int(item["color"][i:i + 2], 16) for i in (1, 3, 5))
+        mask = burned & (classes == item["value"])
+        rgba[mask] = (red, green, blue, 230)
+    label = run.get("label") or run["run_id"]
+    group = folium.FeatureGroup(name=f"{label} ∩ {overlay['name']}", show=False)
+    folium.raster_layers.ImageOverlay(image=rgba, bounds=[[south, west], [north, east]],
+                                      mercator_project=True).add_to(group)
     group.add_to(fmap)
 
 
