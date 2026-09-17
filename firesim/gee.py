@@ -2,7 +2,8 @@
 
 Only US-covered public datasets are used (see docs/pyretechnics_weathernext3_inputs.md):
 - Topography: USGS/SRTMGL1_003
-- Land cover (fuel model basis): USGS/NLCD_RELEASES/2019_REL/NLCD/2019
+- Fuels + canopy (default): LANDFIRE 2023 (LF 2.4.0) from the GEE community catalog
+- Land cover (fuel_source="nlcd" crosswalk): USGS/NLCD_RELEASES/2019_REL/NLCD/2019
 - Weather + 100 hr dead fuel moisture: IDAHO_EPSCOR/GRIDMET
 """
 
@@ -87,6 +88,83 @@ def fetch_water_mask(region, scale, threshold=0.25) -> np.ndarray:
         .reproject(crs="EPSG:4326", scale=scale)
     )
     return download_image(fraction.unmask(0).clip(region), region, scale)[0] > threshold
+
+
+# --- LANDFIRE 2023 (LF 2.4.0), GEE community catalog (public domain) ---
+LANDFIRE_FUEL = "projects/sat-io/open-datasets/landfire/FUEL/"
+LANDFIRE_VERSION = "2.4.0"
+LANDFIRE_NODATA = -9999        # value written for cells outside LANDFIRE coverage
+LANDFIRE_WATER_CODES = (98, 92)  # FBFM40 NB8 open water, NB2 snow/ice
+LANDFIRE_LAYERS = {              # key -> (collection, band)
+    "fuel_model": ("FBFM40", "F40"),
+    "cc": ("CC", "CC"),
+    "ch": ("CH", "CH"),
+    "cbh": ("CBH", "CBH"),
+    "cbd": ("CBD", "CBD"),
+}
+REDUCE_MAX_PIXELS = 1024       # 30 m cells combined per sim cell (sim cells up to ~960 m)
+
+
+def _landfire_conus(collection: str) -> "ee.Image":
+    """CONUS image of one LANDFIRE layer in its native 30 m EPSG:5070 projection.
+
+    Deliberately not `.mosaic()`: a mosaic loses the native projection, so reduceResolution
+    would silently aggregate on a 1-degree grid.
+    """
+    images = ee.ImageCollection(LANDFIRE_FUEL + collection).filter(ee.Filter.eq("region_code", "LC"))
+    return ee.Image(images.first())
+
+
+def _aggregate(image, reducer, scale):
+    """Aggregate a 30 m layer to the sim grid with an explicit reducer (not EE's pyramids)."""
+    return image.reduceResolution(reducer=reducer, maxPixels=REDUCE_MAX_PIXELS).reproject(
+        crs="EPSG:4326", scale=scale
+    )
+
+
+def fetch_landfire(region, scale) -> dict:
+    """Return LANDFIRE 2023 fuels on the sim grid, still in raw LANDFIRE encodings.
+
+    Keys (rows, cols): fuel_model (FBFM40 code; LANDFIRE_NODATA or -inf outside coverage), cc (%),
+    ch / cbh (m x 10), cbd (kg/m3 x 100), water_fraction (0-1). Use
+    `physics.landfire_to_canopy` and `physics.sanitize_fuel_model` before running the model.
+
+    Categorical layers (FBFM40, binned CC) take the mode. Canopy height, base height and bulk
+    density are averaged over canopy pixels only, so non-forest zeros inside a cell do not
+    dilute them (a falsely low base height would over-predict crown fire).
+    """
+    sources = {key: _landfire_conus(coll) for key, (coll, _) in LANDFIRE_LAYERS.items()}
+    versions = ee.List([img.get("version") for img in sources.values()]).getInfo()
+    if any(v != LANDFIRE_VERSION for v in versions):
+        raise ValueError(f"Expected LANDFIRE {LANDFIRE_VERSION} assets, found versions {versions}.")
+    images = {key: sources[key].select(band) for key, (_, band) in LANDFIRE_LAYERS.items()}
+
+    fuel = images["fuel_model"]
+    is_water = fuel.eq(LANDFIRE_WATER_CODES[0])
+    for code in LANDFIRE_WATER_CODES[1:]:
+        is_water = is_water.Or(fuel.eq(code))
+
+    def canopy_mean(key):
+        raw = images[key]
+        return _aggregate(raw.updateMask(raw.gt(0)), ee.Reducer.mean(), scale).unmask(0).rename(key)
+
+    stack = ee.Image.cat([
+        _aggregate(fuel, ee.Reducer.mode(), scale).unmask(LANDFIRE_NODATA).rename("fuel_model"),
+        _aggregate(images["cc"], ee.Reducer.mode(), scale).unmask(0).rename("cc"),
+        canopy_mean("ch"),
+        canopy_mean("cbh"),
+        canopy_mean("cbd"),
+        _aggregate(is_water, ee.Reducer.mean(), scale).unmask(0).rename("water_fraction"),
+    ]).toFloat()  # GeoTIFF export needs one data type across bands
+    arr = download_image(stack.clip(region), region, scale)
+    layers = dict(zip(["fuel_model", "cc", "ch", "cbh", "cbd", "water_fraction"], arr))
+    fuel_model = layers["fuel_model"]
+    # Outside the image footprint unmask() has nothing to fill, so the GeoTIFF holds -inf.
+    if not np.any(np.isfinite(fuel_model) & (fuel_model != LANDFIRE_NODATA)):
+        raise ValueError(
+            "AOI has no LANDFIRE CONUS coverage. Use fuel_source='nlcd' or move the AOI."
+        )
+    return layers
 
 
 def fetch_gridmet_stack(ignition_date: str, num_days: int, region, scale) -> dict:

@@ -63,7 +63,7 @@ ESRI_WORLD_IMAGERY = (
 
 
 def build_map(config, results, save_html=None) -> folium.Map:
-    """Interactive map: AOI, ignition point, arrival-day overlay, daily perimeters.
+    """Interactive map: AOI, ignition point, arrival-day overlay, daily perimeters, crown fire.
 
     Pass `save_html="path.html"` to also write the map to a standalone HTML file.
     """
@@ -125,6 +125,16 @@ def build_map(config, results, save_html=None) -> folium.Map:
             opacity=0.5,
             name=f"Burned by day {day}",
             show=(day == config.projection_days),
+        ).add_to(fmap)
+
+    crown = results["matrices"]["fire_type"] >= 2  # passive (2) or active (3) crown fire
+    if crown.any():
+        folium.raster_layers.ImageOverlay(
+            image=_mask_uri(crown, color=(110, 0, 150), alpha=200),
+            bounds=bounds,
+            opacity=0.7,
+            name="Crown fire",
+            show=False,
         ).add_to(fmap)
 
     folium.LayerControl(collapsed=False).add_to(fmap)

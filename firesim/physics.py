@@ -1,9 +1,10 @@
 """Derived physical quantities: unit conversions, dead fuel moisture, fuel mapping.
 
-These turn raw GRIDMET/NLCD arrays into the units pyretechnics expects.
+These turn raw GRIDMET/NLCD/LANDFIRE arrays into the units pyretechnics expects.
 """
 
 import numpy as np
+from pyretechnics.fuel_models import list_fuel_model_numbers
 
 # NLCD land-cover class -> Scott & Burgan 40 fuel model number.
 # Non-burnable codes (91-99) stop spread on water/urban/barren/agriculture.
@@ -31,6 +32,51 @@ def nlcd_to_fuel_model(landcover: np.ndarray) -> np.ndarray:
     for code, model in NLCD_TO_FUEL.items():
         fuel[landcover == code] = model
     return fuel
+
+
+CANOPY_LAYERS = ("canopy_cover", "canopy_height", "canopy_base_height", "canopy_bulk_density")
+
+# LANDFIRE 2023 canopy encodings -> pyretechnics units (matches pyretechnics.load_landfire).
+#   cube key               raw key  multiplier  max    raw -> model
+LANDFIRE_CANOPY = {
+    "canopy_cover":        ("cc",  0.01, 0.95),  # percent       -> fraction 0-1
+    "canopy_height":       ("ch",  0.10, 51.0),  # m x 10        -> m
+    "canopy_base_height":  ("cbh", 0.10, 10.0),  # m x 10        -> m
+    "canopy_bulk_density": ("cbd", 0.01, 0.45),  # kg/m3 x 100   -> kg/m3
+}
+
+VALID_FUEL_MODELS = np.array(sorted(list_fuel_model_numbers()))
+NONBURNABLE_BARREN = 99  # NB9
+
+
+def sanitize_fuel_model(fuel_model: np.ndarray) -> np.ndarray:
+    """Replace any code pyretechnics does not define (fill values, masked cells) with NB9.
+
+    pyretechnics looks fuel models up in an unchecked C array indexed by the code, so an
+    unknown code (e.g. LANDFIRE's -9999) reads garbage memory instead of raising an error.
+    """
+    finite = np.where(np.isfinite(fuel_model), fuel_model, NONBURNABLE_BARREN)
+    codes = np.rint(np.clip(finite, -1, 1000)).astype("int32")
+    return np.where(np.isin(codes, VALID_FUEL_MODELS), codes, NONBURNABLE_BARREN).astype("float32")
+
+
+def landfire_to_canopy(raw: dict) -> dict:
+    """Convert raw LANDFIRE CC/CH/CBH/CBD arrays to pyretechnics canopy cubes.
+
+    Values are clipped to LANDFIRE's documented ranges (fill and non-finite -> 0). Cells without
+    canopy cover get zero height/base/density, and base height never exceeds canopy height.
+    """
+    canopy = {
+        key: np.clip(np.where(np.isfinite(raw[name]), raw[name], 0.0) * multiplier, 0.0, upper)
+        .astype("float32")
+        for key, (name, multiplier, upper) in LANDFIRE_CANOPY.items()
+    }
+    height, base = canopy["canopy_height"], canopy["canopy_base_height"]
+    canopy["canopy_base_height"] = np.where(height > 0.0, np.minimum(base, height), base)
+    no_canopy = canopy["canopy_cover"] <= 0.0
+    for arr in canopy.values():
+        arr[no_canopy] = 0.0
+    return canopy
 
 
 def gridmet_to_weather(stack: dict):
