@@ -145,14 +145,14 @@ Each `pyretechnics` input is classified into one of three procurement statuses, 
 | `fuel_moisture_dead_1hr` | 🟡 Processed | **GRIDMET** (`rmax`,`rmin`,`tmmx`,`tmmn`) / **WeatherNext 3** | EMC (Fosberg/NFDRS) → `1hr ≈ 1.03×EMC` |
 | `fuel_moisture_dead_10hr` | 🟡 Processed | **GRIDMET** / **WeatherNext 3** (same) | EMC → `10hr ≈ 1.28×EMC` |
 | `fuel_moisture_dead_100hr` | 🟢 Direct | **GRIDMET** `fm100` (`IDAHO_EPSCOR/GRIDMET`) | 100-hr dead fuel moisture band, read as-is |
-| `canopy_cover` | 🟢 Direct | **LANDFIRE US CC** (Forest Canopy Cover, Fuel category) or `LANDFIRE/Vegetation/EVC` in EE | Rescale to 0–1 fraction |
-| `canopy_height` | 🟢 Direct | **LANDFIRE US CH** (Forest Canopy Height, Fuel category) or `LANDFIRE/Vegetation/EVH` in EE | Read height in m |
-| `fuel_model` | 🟢 Direct | **LANDFIRE US FBFM40** (Scott & Burgan 40) — Fuel category, ingest from LANDFIRE program | Read integer fuel-model code as-is |
+| `canopy_cover` | 🟢 Direct | **LANDFIRE 2023 CC** — `projects/sat-io/open-datasets/landfire/FUEL/CC` (EE community catalog) | Percent ÷ 100 → 0–1 fraction |
+| `canopy_height` | 🟢 Direct | **LANDFIRE 2023 CH** — `projects/sat-io/open-datasets/landfire/FUEL/CH` | m × 10 → ÷ 10 |
+| `fuel_model` | 🟢 Direct | **LANDFIRE 2023 FBFM40** (Scott & Burgan 40) — `projects/sat-io/open-datasets/landfire/FUEL/FBFM40` | Integer code as-is; unknown/nodata → 99 |
 | `fuel_moisture_live_herbaceous` | � MVP constant | Seasonal constant by fuel type (upgrade: NFMD / satellite LFMC) | Fixed % by season/fuel model |
 | `fuel_moisture_live_woody` | 🟡 MVP constant | Seasonal constant by fuel type (upgrade: NFMD / satellite LFMC) | Fixed % by season/fuel model |
 | `foliar_moisture` | 🟡 MVP constant | Seasonal constant ~100% (standard in FARSITE/FlamMap) | Fixed % |
-| `canopy_base_height` | 🟢 Direct | **LANDFIRE US CBH** (Fuel category, external ingest) | Read in m |
-| `canopy_bulk_density` | 🟢 Direct | **LANDFIRE US CBD** (Fuel category, external ingest) | Read in kg/m³ |
+| `canopy_base_height` | 🟢 Direct | **LANDFIRE 2023 CBH** — `projects/sat-io/open-datasets/landfire/FUEL/CBH` | m × 10 → ÷ 10 |
+| `canopy_bulk_density` | 🟢 Direct | **LANDFIRE 2023 CBD** — `projects/sat-io/open-datasets/landfire/FUEL/CBD` | kg/m³ × 100 → ÷ 100 |
 
 ### 5.1 Relevant Earth Engine catalog datasets (confirmed)
 
@@ -169,12 +169,48 @@ Each `pyretechnics` input is classified into one of three procurement statuses, 
 | Canopy height (global) | `users/nlang/ETH_GlobalCanopyHeight_2020_10m_v1`, `LARSE/GEDI/GEDI02_A_*` | GEDI/ETH canopy height |
 | Land cover (global) | `ESA/WorldCover/v200` | Fallback basis for fuel-model crosswalk |
 
-> **US scope — key EE gap:** This project targets the **US**, where LANDFIRE provides full,
-> fire-ready coverage of **all** the fuels/canopy layers. However, the official Earth Engine
-> LANDFIRE catalog only exposes the **Vegetation** and **Fire** categories — the **Fuel**
-> category (`FBFM40`, `CC`, `CH`, `CBH`, `CBD`) is **not** in EE. These must be ingested from
-> the LANDFIRE program directly (e.g., the LANDFIRE product download / `rasterio` load).
-> They are not a data *gap* for the US — just an *out-of-Earth-Engine* fetch step.
+> **LANDFIRE fuels are in Earth Engine via the community catalog.** The official EE catalog only
+> carries old LANDFIRE Vegetation layers (`v1_4_0`) and no fuel models, but the **awesome-gee
+> community catalog** publishes the full LANDFIRE 2023 (LF 2.4.0) **Fuel** category — see §5.2.
+> This is what `fuel_source="landfire"` uses.
+
+### 5.2 LANDFIRE 2023 fuels in Earth Engine (implemented)
+
+Source: <https://gee-community-catalog.org/projects/landfire/> (curated by Samapriya Roy), value
+encodings from the LF 2023 Attribute Data Dictionaries on landfire.gov. Verified against the live
+assets on 2026-09-17.
+
+- Assets: `projects/sat-io/open-datasets/landfire/FUEL/{FBFM40,CC,CH,CBH,CBD}` (uppercase
+  `FUEL` — the catalog's lowercase example path no longer resolves). Each is an
+  `ImageCollection` with one image per region (`region_code`: `LC` CONUS, `LA` Alaska, `LH`
+  Hawaii, `LV` PR/VI). CONUS is EPSG:5070 at 30 m. Image property `version == "2.4.0"`.
+- Public (any registered EE user), public domain; no year/version history in the collection —
+  updates replace images in place, so the code asserts the version.
+
+| Layer | Band | Raw encoding (int16) | pyretechnics units | Non-forest / nodata |
+|---|---|---|---|---|
+| FBFM40 | `F40` | Scott & Burgan codes 91–204 | as-is | masked outside coverage |
+| CC | `CC` | percent (bin midpoints 15–95) | ÷ 100 → 0–1 | 0 |
+| CH | `CH` | m × 10 (30–510) | ÷ 10 → m | 0 |
+| CBH | `CBH` | m × 10 (1–100, 100 = ≥ 10 m) | ÷ 10 → m | 0 |
+| CBD | `CBD` | kg/m³ × 100 (1–45) | ÷ 100 → kg/m³ | 0 |
+
+The EE `data_type` property on CH says "divide by 100" — that is wrong; the ADD and observed
+values (max 390 over the Sierra) confirm m × 10. These multipliers match
+`pyretechnics.load_landfire.landfire_array_conversions`.
+
+**Gotchas handled in `firesim`:**
+- Don't `.mosaic()` before `reduceResolution` — it drops the native projection and aggregates on
+  a 1° grid. The CONUS image is selected directly.
+- Aggregation to the sim grid is explicit: **mode** for FBFM40 and binned CC; **mean over canopy
+  pixels only** for CH/CBH/CBD (non-forest zeros would otherwise lower base height and
+  over-predict crown fire).
+- pyretechnics indexes fuel models in an unchecked C array, so any unknown code (masked cells
+  export as `-inf`) is replaced with NB9 (`99`) before the run.
+- Timber fuel models with CC = 0 are normal: LANDFIRE folds that canopy into the surface fuel model.
+
+Citation: *LANDFIRE: [Product] layer (2023, LF 2.4.0). U.S. Department of the Interior,
+Geological Survey. https://landfire.gov/* — curated in GEE by Samapriya Roy.
 
 ---
 
@@ -186,8 +222,8 @@ layers are sourced as follows:
 1. **Topography** (`slope`, `aspect`) → 🟡 computed from an EE DEM (`USGS/SRTMGL1_003`,
    `COPERNICUS/DEM/GLO30`, or `USGS/3DEP/10m`) via `ee.Terrain`.
 2. **Fuels & canopy structure** (`fuel_model`, `canopy_cover`, `canopy_height`,
-   `canopy_base_height`, `canopy_bulk_density`) → 🟢 fully covered by **LANDFIRE (US)**.
-   Note the **Fuel** category is fetched from the LANDFIRE program directly (not in EE core).
+   `canopy_base_height`, `canopy_bulk_density`) → 🟢 fully covered by **LANDFIRE 2023 (US)**,
+   read from the Earth Engine community catalog (§5.2).
 3. **Dead fuel moisture** (`1hr/10hr/100hr`) → **GRIDMET** supplies `fm100` directly (🟢);
    `1hr`/`10hr` are 🟡 derived from equilibrium moisture content (EMC) using GRIDMET
    humidity/temperature (historical spin-up) and WeatherNext 3 (forecast window).
@@ -216,9 +252,9 @@ layers are sourced as follows:
 | Dead fuel moisture (100 hr) | 100 hr | 🟢 Direct | **GRIDMET** `fm100` |
 | Dead fuel moisture (1/10 hr) | 1 hr, 10 hr | 🟡 Processed | **GRIDMET**/**WeatherNext 3** → EMC (Fosberg/NFDRS) |
 | Topography | slope, aspect | 🟡 Processed | **EE DEM** (`USGS/SRTMGL1_003`, `COPERNICUS/DEM/GLO30`, `USGS/3DEP/10m`) → `ee.Terrain` |
-| Fuel model | fuel_model | 🟢 Direct | **LANDFIRE US** FBFM40 (Fuel category, external fetch) |
-| Canopy cover / height | canopy_cover, canopy_height | 🟢 Direct | **LANDFIRE US** CC/CH (or EE EVC/EVH) |
-| Canopy fuel structure | canopy_base_height, canopy_bulk_density | 🟢 Direct | **LANDFIRE US** CBH/CBD (Fuel category, external fetch) |
+| Fuel model | fuel_model | 🟢 Direct | **LANDFIRE 2023** FBFM40 (EE community catalog) |
+| Canopy cover / height | canopy_cover, canopy_height | 🟢 Direct | **LANDFIRE 2023** CC/CH (EE community catalog) |
+| Canopy fuel structure | canopy_base_height, canopy_bulk_density | 🟢 Direct | **LANDFIRE 2023** CBH/CBD (EE community catalog) |
 | Live fuel moisture | herbaceous, woody, foliar | 🟡 MVP constant | Seasonal constant by fuel type (upgrade: NFMD / LFMC) |
 
 **Bottom line (US MVP):** every model input now has a concrete source. WeatherNext 3 gives
@@ -250,7 +286,7 @@ data sources and the model inputs each one feeds.
 | **WeatherNext 3** | EE / BigQuery / Zarr | ~0.1°, hourly, 15-day horizon | Global | `wind_speed_10m`, `upwind_direction`, `temperature`; forecast-window EMC for dead `1/10 hr` |
 | **GRIDMET** `IDAHO_EPSCOR/GRIDMET` | Earth Engine | ~4 km, daily, 1979→present | CONUS | `fuel_moisture_dead_100hr` (`fm100`); `rmin/rmax/tmmn/tmmx` → EMC → dead `1/10 hr` (spin-up) |
 | **DEM** `USGS/3DEP/10m` (US) or `USGS/SRTMGL1_003` / `COPERNICUS/DEM/GLO30` | Earth Engine | 10–30 m | US / global | `slope`, `aspect` via `ee.Terrain` |
-| **LANDFIRE Fuel** (FBFM40, CC, CH, CBH, CBD) | LANDFIRE program (external, `rasterio`) | 30 m | US | `fuel_model`, `canopy_cover`, `canopy_height`, `canopy_base_height`, `canopy_bulk_density` |
+| **LANDFIRE 2023 Fuel** (FBFM40, CC, CH, CBH, CBD) | Earth Engine community catalog (`projects/sat-io/open-datasets/landfire/FUEL/*`) | 30 m | US (CONUS used) | `fuel_model`, `canopy_cover`, `canopy_height`, `canopy_base_height`, `canopy_bulk_density` |
 | **Seasonal LFMC constants** | config table (in-repo) | — | — | `fuel_moisture_live_herbaceous`, `fuel_moisture_live_woody`, `foliar_moisture` |
 | **Defaults** | constant | — | — | `fuel_spread_adjustment`, `weather_spread_adjustment` = 1.0 (optional) |
 
