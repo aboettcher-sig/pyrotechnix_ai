@@ -30,6 +30,7 @@ import sys
 
 from . import mock, raster
 from .cache import DataStore
+from .montecarlo import run_monte_carlo
 from .config import SimulationConfig
 from .model import fetch_layers, run_simulation
 
@@ -47,11 +48,6 @@ def _build_parser() -> argparse.ArgumentParser:
     fetch_parser.add_argument("--static-only", action="store_true",
                               help="Fetch only the date-independent layers (terrain, fuels, canopy).")
     fetch_parser.set_defaults(func=_cmd_fetch)
-    for sub in (run_parser, fetch_parser):
-        sub.add_argument(
-            "--cache-dir",
-            help="Directory for cached layers, reused across runs on the same area/date.",
-        )
     _add_scenario_args(run_parser)
     _add_scenario_args(fetch_parser)
     run_parser.add_argument("--ignition-lonlat", type=float, nargs=2, required=True,
@@ -80,6 +76,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip Earth Engine and pyretechnics; write a synthetic result with the same format.",
     )
     run_parser.set_defaults(func=_cmd_run)
+
+    mc_parser = subparsers.add_parser(
+        "montecarlo", aliases=["mc"],
+        help="Run N random-ignition simulations and save a probabilistic multiband GeoTIFF.")
+    _add_scenario_args(mc_parser)
+    mc_parser.add_argument("--iterations", "-n", type=int, required=True,
+                           help="Number of random-ignition simulations to run.")
+    mc_parser.add_argument("--seed", type=int, default=None,
+                           help="Random seed for reproducible ignition points.")
+    mc_parser.add_argument("--output-name", "-o", required=True,
+                           help="Output multiband GeoTIFF filename (a .tif extension is added).")
+    mc_parser.add_argument("--summary-json", metavar="PATH",
+                           help="Also write a JSON summary (scenario, stats, grid, provenance).")
+    mc_parser.set_defaults(func=_cmd_montecarlo)
     return parser
 
 
@@ -95,6 +105,8 @@ def _add_scenario_args(sub) -> None:
                      help="Weather backend (default: gridmet).")
     sub.add_argument("--fuel-source", default="landfire", choices=["landfire", "nlcd"],
                      help="Fuels: landfire (LANDFIRE 2023 FBFM40 + canopy, default) or nlcd.")
+    sub.add_argument("--cache-dir",
+                     help="Directory for cached layers, reused across runs on the same area/date.")
 
 
 def _config_from(args, **overrides) -> SimulationConfig:
@@ -186,6 +198,67 @@ def _write_summary(path, config, results, output_path, is_mock) -> None:
     path = pathlib.Path(path).expanduser()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(summary, indent=2))
+
+
+def _cmd_montecarlo(args: argparse.Namespace) -> int:
+    """Many random ignitions over one area: burn probability and intensity percentiles."""
+    aoi_bounds = tuple(args.aoi_bounds)
+    _validate_scenario(aoi_bounds, None, args.ignition_date, args.projection_days)
+    if args.iterations < 1:
+        raise ValueError("iterations must be >= 1.")
+    output_path = _resolve_output_path(args.output_name)
+
+    west, south, east, north = aoi_bounds
+    # Monte Carlo samples its own ignition cells; the centre is just an in-bounds placeholder.
+    config = _config_from(args, ignition_lonlat=((west + east) / 2.0, (south + north) / 2.0))
+    store = DataStore(config.cache_dir) if config.cache_dir else None
+
+    print(f"Running {args.iterations} Monte Carlo simulations..."
+          + (f" (cache: {config.cache_dir})" if store else ""))
+    aggregate = run_monte_carlo(config, args.iterations, seed=args.seed, store=store)
+    saved = raster.write_monte_carlo_geotiff(aggregate, config, output_path)
+
+    probability = aggregate["probability"]
+    meta = aggregate["meta"]
+    burned_cells = int((aggregate["burn_count"] > 0).sum())
+    print(f"Saved Monte Carlo GeoTIFF: {saved}")
+    print(f"Iterations: {aggregate['iterations']} | max burn probability: {float(probability.max()):.2f} | "
+          f"cells burned at least once: {burned_cells} | cell size: {meta['scale']:.0f} m | "
+          f"weather: {meta['weather_source']} | fuels: {meta.get('fuel_source')}")
+
+    if args.summary_json:
+        cell_ha = meta["scale"] ** 2 / 1e4
+        summary = {
+            "output": saved,
+            "kind": "montecarlo",
+            "scenario": {
+                "aoi_bounds": list(aoi_bounds),
+                "ignition_date": config.ignition_date,
+                "projection_days": config.projection_days,
+                "weather_source": config.weather_source,
+                "fuel_source": config.fuel_source,
+                "iterations": aggregate["iterations"],
+                "seed": args.seed,
+            },
+            "weather_source_used": meta["weather_source"],
+            "fuel_source_used": meta.get("fuel_source", config.fuel_source),
+            "stats": {
+                "iterations": aggregate["iterations"],
+                "max_burn_probability": round(float(probability.max()), 4),
+                "mean_burn_probability": round(float(probability.mean()), 4),
+                "cells_burned_at_least_once": burned_cells,
+                "hectares_burned_at_least_once": round(burned_cells * cell_ha, 1),
+                "cell_size_m": round(meta["scale"], 1),
+            },
+            "grid": {"crs": "EPSG:4326", "shape": [meta["rows"], meta["cols"]],
+                     "cell_size_m": meta["scale"], "nodata": raster.NODATA,
+                     "bands": [description for _, description in raster.MONTE_CARLO_BANDS]},
+            "cache": meta.get("cache", {}),
+        }
+        path = pathlib.Path(args.summary_json).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(summary, indent=2))
+    return 0
 
 
 def _cmd_run(args: argparse.Namespace) -> int:

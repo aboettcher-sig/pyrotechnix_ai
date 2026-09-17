@@ -77,3 +77,45 @@ def write_geotiff(results, config, output_path) -> str:
             dataset.set_band_description(index, name)
 
     return str(output_path)
+
+
+# --- Monte Carlo aggregate (many random ignitions over one area) ---
+
+MONTE_CARLO_BANDS = (
+    ("burn_count", "burn_count"),
+    ("mean_intensity", "mean_fireline_intensity_kw_m"),
+    ("p10_intensity", "p10_fireline_intensity_kw_m"),
+    ("p90_intensity", "p90_fireline_intensity_kw_m"),
+    ("probability", "burn_probability"),
+)
+
+
+def write_monte_carlo_geotiff(aggregate, config, output_path) -> str:
+    """Write the 5-band Monte Carlo aggregate as an EPSG:4326 GeoTIFF and return its path.
+
+    Bands: burn count, mean/p10/p90 fireline intensity (kW/m), burn probability. Intensity bands
+    use -999 nodata where a cell never burned; count and probability use 0 (a valid value).
+    """
+    stack = np.stack([aggregate[key].astype("float32") for key, _ in MONTE_CARLO_BANDS])
+    rows, cols = stack.shape[1:]
+    west, south, east, north = config.aoi_bounds
+    transform = from_bounds(west, south, east, north, cols, rows)
+
+    with rasterio.open(
+        output_path,
+        "w",
+        driver="GTiff",
+        height=rows,
+        width=cols,
+        count=stack.shape[0],
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=transform,
+        nodata=NODATA,
+        compress="deflate",
+    ) as dataset:
+        dataset.write(stack)
+        for index, (_, description) in enumerate(MONTE_CARLO_BANDS, start=1):
+            dataset.set_band_description(index, description)
+
+    return str(output_path)

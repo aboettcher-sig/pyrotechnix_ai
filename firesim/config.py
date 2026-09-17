@@ -43,6 +43,9 @@ class SimulationConfig:
     max_pixels: int = 160       # longest AOI side in pixels (controls resolution/cost)
     min_scale_m: float = 30.0   # floor on cell size in meters
 
+    # --- Data cache (reuse fetched layers across runs; None disables) ---
+    cache_dir: str | None = None
+
     # --- Live fuel moisture constants (kg moisture / kg ovendry) — MVP ---
     live_herbaceous: float = 0.9
     live_woody: float = 0.6
