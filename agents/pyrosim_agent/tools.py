@@ -459,8 +459,9 @@ async def show_map(run_ids: list[str], observed_fire: str = "", tool_context: To
     max_hours = max(run["scenario"]["projection_days"] for run in runs) * 24.0
 
     features = observed.perimeter_features(observed_fire) if observed_fire else None
+    classified = maps.classified_overlays(observed_fire) if observed_fire else None
     basemap = await asyncio.to_thread(maps.render_png, runs, png_path, max_hours, features)
-    await asyncio.to_thread(maps.render_html, runs, html_path, max_hours, features)
+    await asyncio.to_thread(maps.render_html, runs, html_path, max_hours, features, classified)
 
     artifact_name = None
     if tool_context is not None:
@@ -477,5 +478,7 @@ async def show_map(run_ids: list[str], observed_fire: str = "", tool_context: To
         "html_url": html_path.resolve().as_uri(),
         "basemap": basemap,
         "observed_fire": observed_fire or None,
+        "classified_overlays": [{"name": o["name"], "classes": [c["label"] for c in o["legend"]]}
+                                for o in (classified or []) if o],
         "runs": [{"run_id": r["run_id"], "label": r.get("label", ""), "mode": r.get("mode")} for r in runs],
     }
