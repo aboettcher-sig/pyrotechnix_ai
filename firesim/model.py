@@ -123,15 +123,17 @@ def assemble_inputs(config, static, weather_stack):
         "start_minutes": weather_stack.start_minutes,
         "weather_source": weather_stack.source,
         "non_land_mask": non_land if config.constrain_to_land else None,
+        "burnable_mask": (fuel_model < 91) | (fuel_model > 99),  # 91-99 (incl. water 98) never spread
     }
     return space_time_cubes, meta
 
 
-def run_simulation(config, store=None):
-    """Build inputs, spread the fire, and return matrices + metadata + stats."""
-    space_time_cubes, meta = build_inputs(config, store)
-    ignition_rc = lonlat_to_rc(*config.ignition_lonlat, config.aoi_bounds, meta["rows"], meta["cols"])
+def spread_once(space_time_cubes, meta, ignition_rc, config):
+    """Spread one fire from an ignition cell over already-assembled inputs.
 
+    Returns (matrices, result). The inputs are read-only, so the same `space_time_cubes` can be
+    reused across many ignitions (Monte Carlo) without reassembly.
+    """
     spread_state = els.SpreadState(meta["cube_shape"]).ignite_cell(ignition_rc)
     cube_resolution = (meta["band_duration_min"], meta["scale"], meta["scale"])
     result = els.spread_fire_with_phi_field(
@@ -144,6 +146,14 @@ def run_simulation(config, store=None):
     matrices = result["spread_state"].get_full_matrices()
     if meta["non_land_mask"] is not None:
         matrices["time_of_arrival"][meta["non_land_mask"]] = np.nan
+    return matrices, result
+
+
+def run_simulation(config, store=None):
+    """Build inputs, spread the fire, and return matrices + metadata + stats."""
+    space_time_cubes, meta = build_inputs(config, store)
+    ignition_rc = lonlat_to_rc(*config.ignition_lonlat, config.aoi_bounds, meta["rows"], meta["cols"])
+    matrices, result = spread_once(space_time_cubes, meta, ignition_rc, config)
     stats = compute_stats(matrices, meta["scale"], result)
     return {"matrices": matrices, "meta": meta, "stats": stats, "ignition_rc": ignition_rc}
 

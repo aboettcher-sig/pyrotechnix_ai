@@ -27,6 +27,7 @@ from .cache import DataStore
 from .config import SimulationConfig
 from .gee import initialize_ee
 from .model import run_simulation
+from .montecarlo import run_monte_carlo
 
 
 def _add_data_args(sub) -> None:
@@ -109,6 +110,33 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Fetch only the date-independent layers (DEM/fuel/water), not the weather.",
     )
     fetch_parser.set_defaults(func=_cmd_fetch)
+
+    mc_parser = subparsers.add_parser(
+        "montecarlo",
+        aliases=["mc"],
+        help="Run N random-ignition simulations and save a probabilistic multiband GeoTIFF.",
+    )
+    _add_data_args(mc_parser)
+    mc_parser.add_argument(
+        "--iterations",
+        "-n",
+        type=int,
+        required=True,
+        help="Number of random-ignition simulations to run.",
+    )
+    mc_parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Random seed for reproducible ignition points.",
+    )
+    mc_parser.add_argument(
+        "--output-name",
+        "-o",
+        required=True,
+        help="Output multiband GeoTIFF filename (a .tif extension is added if missing).",
+    )
+    mc_parser.set_defaults(func=_cmd_montecarlo)
     return parser
 
 
@@ -220,6 +248,43 @@ def _cmd_fetch(args: argparse.Namespace) -> int:
     weather_stack = weather.get_weather(config, region, scale)
     store.save_weather(config, weather_stack)
     print(f"Cached static + weather ({weather_stack.source}) layers to {config.cache_dir}")
+    return 0
+
+
+def _cmd_montecarlo(args: argparse.Namespace) -> int:
+    aoi_bounds = tuple(args.aoi_bounds)
+    _validate_aoi(aoi_bounds, args.projection_days)
+    if args.iterations < 1:
+        raise ValueError("iterations must be >= 1.")
+    output_path = _resolve_output_path(args.output_name)
+
+    # AOI center is an in-bounds placeholder; Monte Carlo samples its own random ignition cells.
+    west, south, east, north = aoi_bounds
+    config = SimulationConfig(
+        aoi_bounds=aoi_bounds,
+        ignition_lonlat=((west + east) / 2.0, (south + north) / 2.0),
+        ignition_date=args.ignition_date,
+        projection_days=args.projection_days,
+        weather_source=args.weather_source,
+        cache_dir=args.cache_dir,
+    )
+
+    store = DataStore(config.cache_dir) if config.cache_dir else None
+    if store:
+        print(f"Using cache: {config.cache_dir}")
+    print(f"Running {args.iterations} Monte Carlo simulations...")
+    aggregate = run_monte_carlo(config, args.iterations, seed=args.seed, store=store)
+
+    saved = raster.write_monte_carlo_geotiff(aggregate, config, output_path)
+    print(f"Saved Monte Carlo GeoTIFF: {saved}")
+
+    probability = aggregate["probability"]
+    print(
+        f"Iterations: {aggregate['iterations']} | "
+        f"max burn probability: {float(probability.max()):.2f} | "
+        f"cells burned at least once: {int((aggregate['burn_count'] > 0).sum())} | "
+        f"weather: {aggregate['meta']['weather_source']}"
+    )
     return 0
 
 

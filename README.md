@@ -147,3 +147,40 @@ delete the cache directory to invalidate it.
 Earth Engine is initialized **lazily**, only when a layer is missing from the cache. A `run`
 whose AOI/date is fully cached needs no EE authentication or network call at all, so batches of
 runs at different ignition points stay offline and fast.
+
+## Monte Carlo (probabilistic burn map)
+
+`pyroSim montecarlo` runs many simulations from **random ignition points** on the same AOI, date,
+projection, and weather, then aggregates them into one multiband GeoTIFF — no intermediate files.
+Inputs are assembled once and reused across every iteration, and ignition points are drawn only
+from burnable land.
+
+```bash
+pyroSim montecarlo \
+  --aoi-bounds -120.55 39.00 -120.30 39.20 \
+  --ignition-date 2026-09-10 \
+  --projection-days 5 \
+  --weather-source weathernext \
+  --iterations 200 \
+  --seed 42 \
+  --cache-dir ./tahoe_cache \
+  --output-name tahoe_montecarlo.tif
+```
+
+`--iterations`/`-n` sets the number of simulations; `--seed` makes the random ignitions
+reproducible; `--cache-dir` is recommended so the data is fetched once. It accepts no
+`--ignition-lonlat` (the points are random).
+
+### Output bands (`EPSG:4326`, float32)
+
+| Band | Name | Meaning |
+| --- | --- | --- |
+| 1 | `burn_count` | Number of iterations the cell burned |
+| 2 | `mean_fireline_intensity_kw_m` | Mean intensity (kW/m) over iterations where it burned |
+| 3 | `p10_fireline_intensity_kw_m` | 10th-percentile intensity (same set) |
+| 4 | `p90_fireline_intensity_kw_m` | 90th-percentile intensity (same set) |
+| 5 | `burn_probability` | `burn_count / iterations` — probability of active fire within the projection window |
+
+Intensity bands (2–4) use `-999` nodata where a cell never burned; `burn_count` and
+`burn_probability` use `0` (a valid value). Memory scales with `iterations × rows × cols`, so for
+very large runs keep the AOI/`--max-pixels` modest.

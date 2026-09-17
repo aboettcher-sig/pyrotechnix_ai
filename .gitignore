@@ -13,3 +13,7 @@ __pycache__/
 
 *.tif
 *.tiff
+
+# firesim data cache (pyroSim fetch / --cache-dir, e.g. tahoe_cache/)
+*_cache/
+.firesim_cache/

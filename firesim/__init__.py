@@ -13,6 +13,7 @@ Typical use (from the notebook)::
 from .config import SimulationConfig
 from .gee import initialize_ee
 from .model import fetch_layers, run_simulation
+from .montecarlo import run_monte_carlo
 from .cache import DataStore
 from . import raster, viz
 
@@ -20,6 +21,7 @@ __all__ = [
     "SimulationConfig",
     "run",
     "prepare_data",
+    "run_monte_carlo",
     "viz",
     "raster",
     "DataStore",

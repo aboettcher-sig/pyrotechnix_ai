@@ -106,3 +106,49 @@ def write_intensity_geotiff(results, config, output_path) -> str:
 def write_severity_geotiff(results, config, output_path) -> str:
     """Write the flame-length severity-class grid as an EPSG:4326 GeoTIFF and return its path."""
     return _write_geotiff(severity_map(results), config, output_path, SEVERITY_NODATA, "flame_length_severity_class")
+
+
+def _write_multiband_geotiff(bands, descriptions, config, output_path, nodata) -> str:
+    """Write a stack of same-shape arrays as a multiband EPSG:4326 GeoTIFF over the AOI."""
+    rows, cols = bands[0].shape
+    west, south, east, north = config.aoi_bounds
+    transform = from_bounds(west, south, east, north, cols, rows)
+
+    with rasterio.open(
+        output_path,
+        "w",
+        driver="GTiff",
+        height=rows,
+        width=cols,
+        count=len(bands),
+        dtype="float32",
+        crs="EPSG:4326",
+        transform=transform,
+        nodata=nodata,
+        compress="deflate",
+    ) as dataset:
+        for index, (array, description) in enumerate(zip(bands, descriptions), start=1):
+            dataset.write(array.astype("float32"), index)
+            dataset.set_band_description(index, description)
+
+    return str(output_path)
+
+
+MONTE_CARLO_BANDS = (
+    ("burn_count", "burn_count"),
+    ("mean_intensity", "mean_fireline_intensity_kw_m"),
+    ("p10_intensity", "p10_fireline_intensity_kw_m"),
+    ("p90_intensity", "p90_fireline_intensity_kw_m"),
+    ("probability", "burn_probability"),
+)
+
+
+def write_monte_carlo_geotiff(aggregate, config, output_path) -> str:
+    """Write the 5-band Monte Carlo aggregate as an EPSG:4326 GeoTIFF and return its path.
+
+    Bands: burn count, mean/p10/p90 fireline intensity (kW/m), burn probability. Intensity bands
+    use -999 nodata where a cell never burned; count and probability use 0 (a valid value).
+    """
+    bands = [aggregate[key] for key, _ in MONTE_CARLO_BANDS]
+    descriptions = [desc for _, desc in MONTE_CARLO_BANDS]
+    return _write_multiband_geotiff(bands, descriptions, config, output_path, NODATA)
