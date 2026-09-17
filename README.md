@@ -69,6 +69,8 @@ run it via `uv run pyroSim run ...` or `.venv/bin/pyroSim run ...`. The equivale
 | `--projection-days N` | yes | Projection horizon in days. |
 | `--weather-source {gridmet,weathernext}` | no | Weather backend (default: `gridmet`). |
 | `--output-name NAME`, `-o NAME` | yes | Output GeoTIFF filename (a `.tif` extension is added if missing). |
+| `--summary-json PATH` | no | Also write a JSON summary (scenario, stats, grid, weather source used). |
+| `--mock` | no | Skip Earth Engine and pyretechnics; write a synthetic result with the same format, in seconds. |
 
 Run `pyroSim run --help` for the full reference.
 
@@ -81,3 +83,29 @@ A single-band GeoTIFF (`EPSG:4326`) named after `--output-name`:
 - A cell that burns two weather cycles later = `2 × weather step` hours (e.g. 12 h for a
   6‑hourly WeatherNext step, 48 h for daily GRIDMET).
 - **`-999`** = cells that never burn (including masked water); this is the nodata value.
+
+## Natural-language agent
+
+`agents/pyrosim_agent/` is a Google ADK agent that runs and compares pyroSim simulations from
+plain language ("run the Sierra example for 2 days, then compare with a 4-day horizon"). It calls
+this CLI for every run and stores results under `runs/`.
+
+```bash
+cp agents/pyrosim_agent/.env.example agents/pyrosim_agent/.env   # set GOOGLE_CLOUD_PROJECT
+cd agents && adk web          # or: adk run pyrosim_agent
+```
+
+It needs the Vertex AI API enabled on the project and application-default credentials
+(`gcloud auth application-default login`). `PYROSIM_MODE=mock` (default) uses `--mock`; set
+`PYROSIM_MODE=real` for real runs. Ask it to "show me" a run and the `show_map` tool draws it: an image in the chat
+plus an interactive HTML map under `runs/`.
+
+### Map + chat app
+
+```bash
+streamlit run app/streamlit_app.py     # http://localhost:8501
+```
+
+Map on the left, chat on the right. Runs the agent makes appear on the map, with a time slider for
+hours after ignition and a card per run. Click the map to attach an ignition point to your next
+message. The sidebar switches mock/real mode and can run a simulation without the agent. Design and roadmap: [docs/Fire weather agent — system design.md](docs/Fire%20weather%20agent%20—%20system%20design.md).

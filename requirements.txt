@@ -34,3 +34,7 @@ ipykernel>=6.0.0
 
 # Interactive maps
 folium>=0.15.0
+
+# Map + chat app
+streamlit>=1.40
+streamlit-folium>=0.22

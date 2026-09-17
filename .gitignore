@@ -13,3 +13,9 @@ __pycache__/
 
 *.tif
 *.tiff
+
+# Agent run records
+runs/
+
+# ADK local session store
+.adk/

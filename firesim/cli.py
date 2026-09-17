@@ -12,13 +12,18 @@ Usage::
 
 Saves a single EPSG:4326 GeoTIFF where each pixel is the number of hours before that cell
 burns (0 at the ignition cell, -999 where it never burns).
+
+`--summary-json PATH` also writes a machine-readable run summary (for agents and scripts), and
+`--mock` swaps the real simulation for a fast synthetic one with the same outputs.
 """
 
 import argparse
+import datetime
+import json
 import pathlib
 import sys
 
-from . import raster
+from . import mock, raster
 from .config import SimulationConfig
 from .gee import initialize_ee
 from .model import run_simulation
@@ -72,6 +77,16 @@ def _build_parser() -> argparse.ArgumentParser:
         required=True,
         help="Output GeoTIFF filename (a .tif extension is added if missing).",
     )
+    run_parser.add_argument(
+        "--summary-json",
+        metavar="PATH",
+        help="Also write a JSON summary (scenario, stats, grid, provenance) to PATH.",
+    )
+    run_parser.add_argument(
+        "--mock",
+        action="store_true",
+        help="Skip Earth Engine and pyretechnics; write a synthetic result with the same format.",
+    )
     run_parser.set_defaults(func=_cmd_run)
     return parser
 
@@ -84,21 +99,52 @@ def _resolve_output_path(output_name: str) -> pathlib.Path:
     return path
 
 
-def _validate_scenario(aoi_bounds, ignition_lonlat, projection_days) -> None:
+def _validate_scenario(aoi_bounds, ignition_lonlat, ignition_date, projection_days) -> None:
     west, south, east, north = aoi_bounds
     if west >= east or south >= north:
         raise ValueError("aoi-bounds must be ordered as west south east north with west<east, south<north.")
     lon, lat = ignition_lonlat
     if not (west <= lon <= east and south <= lat <= north):
         raise ValueError("ignition-lonlat must fall inside the AOI bounds.")
+    try:
+        datetime.date.fromisoformat(ignition_date)
+    except ValueError:
+        raise ValueError("ignition-date must be a valid date formatted YYYY-MM-DD.") from None
     if projection_days < 1:
         raise ValueError("projection-days must be >= 1.")
+
+
+def _write_summary(path, config, results, output_path, is_mock) -> None:
+    meta = results["meta"]
+    summary = {
+        "output": str(output_path),
+        "mock": is_mock,
+        "scenario": {
+            "aoi_bounds": list(config.aoi_bounds),
+            "ignition_lonlat": list(config.ignition_lonlat),
+            "ignition_date": config.ignition_date,
+            "projection_days": config.projection_days,
+            "weather_source": config.weather_source,
+        },
+        "weather_source_used": meta["weather_source"],
+        "stats": results["stats"],
+        "grid": {
+            "crs": "EPSG:4326",
+            "shape": [meta["rows"], meta["cols"]],
+            "cell_size_m": meta["scale"],
+            "nodata": raster.NODATA,
+            "band": "hours_before_burn",
+        },
+    }
+    path = pathlib.Path(path).expanduser()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(summary, indent=2))
 
 
 def _cmd_run(args: argparse.Namespace) -> int:
     aoi_bounds = tuple(args.aoi_bounds)
     ignition_lonlat = tuple(args.ignition_lonlat)
-    _validate_scenario(aoi_bounds, ignition_lonlat, args.projection_days)
+    _validate_scenario(aoi_bounds, ignition_lonlat, args.ignition_date, args.projection_days)
     output_path = _resolve_output_path(args.output_name)
 
     config = SimulationConfig(
@@ -109,13 +155,19 @@ def _cmd_run(args: argparse.Namespace) -> int:
         weather_source=args.weather_source,
     )
 
-    print(f"Initializing Earth Engine (project: {config.ee_project or 'unset'})...")
-    initialize_ee(config.ee_project)
+    if args.mock:
+        print("Running MOCK simulation (synthetic spread, no Earth Engine)...")
+        results = mock.run_simulation(config)
+    else:
+        print(f"Initializing Earth Engine (project: {config.ee_project or 'unset'})...")
+        initialize_ee(config.ee_project)
 
-    print("Running simulation...")
-    results = run_simulation(config)
+        print("Running simulation...")
+        results = run_simulation(config)
 
     saved = raster.write_geotiff(results, config, output_path)
+    if args.summary_json:
+        _write_summary(args.summary_json, config, results, saved, args.mock)
 
     stats = results["stats"]
     print(f"Saved GeoTIFF: {saved}")

@@ -1,0 +1,7 @@
+[server]
+# The app can launch simulation processes: only accept connections from this machine.
+address = "localhost"
+headless = true
+
+[browser]
+gatherUsageStats = false
