@@ -78,6 +78,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Output GeoTIFF filename (a .tif extension is added if missing).",
     )
     run_parser.add_argument(
+        "--fuel-source",
+        default="landfire",
+        choices=["landfire", "nlcd"],
+        help="Fuels: landfire (LANDFIRE 2023 FBFM40 + canopy, default) or nlcd (land-cover crosswalk).",
+    )
+    run_parser.add_argument(
+        "--no-crown-fire",
+        action="store_true",
+        help="Zero the canopy layers so only surface fire spreads (this also removes the canopy's "
+             "wind sheltering, so spread is often faster).",
+    )
+    run_parser.add_argument(
         "--summary-json",
         metavar="PATH",
         help="Also write a JSON summary (scenario, stats, grid, provenance) to PATH.",
@@ -125,8 +137,11 @@ def _write_summary(path, config, results, output_path, is_mock) -> None:
             "ignition_date": config.ignition_date,
             "projection_days": config.projection_days,
             "weather_source": config.weather_source,
+            "fuel_source": config.fuel_source,
+            "crown_fire": config.enable_crown_fire,
         },
         "weather_source_used": meta["weather_source"],
+        "fuel_source_used": meta.get("fuel_source", config.fuel_source),
         "stats": results["stats"],
         "grid": {
             "crs": "EPSG:4326",
@@ -153,6 +168,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         ignition_date=args.ignition_date,
         projection_days=args.projection_days,
         weather_source=args.weather_source,
+        fuel_source=args.fuel_source,
+        enable_crown_fire=not args.no_crown_fire,
     )
 
     if args.mock:
@@ -176,6 +193,8 @@ def _cmd_run(args: argparse.Namespace) -> int:
         f"({stats['burned_hectares']:.1f} ha) | "
         f"cell size: {stats['cell_size_m']:.0f} m | "
         f"weather: {results['meta']['weather_source']} | "
+        f"fuels: {results['meta'].get('fuel_source', config.fuel_source)} | "
+        f"crown cells: {stats.get('passive_crown_cells', 0) + stats.get('active_crown_cells', 0)} | "
         f"stop: {stats['stop_condition']}"
     )
     return 0

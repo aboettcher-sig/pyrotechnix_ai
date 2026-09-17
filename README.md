@@ -68,6 +68,8 @@ run it via `uv run pyroSim run ...` or `.venv/bin/pyroSim run ...`. The equivale
 | `--ignition-date YYYY-MM-DD` | yes | Date the fire departs. |
 | `--projection-days N` | yes | Projection horizon in days. |
 | `--weather-source {gridmet,weathernext}` | no | Weather backend (default: `gridmet`). |
+| `--fuel-source {landfire,nlcd}` | no | Fuels (default: `landfire` — LANDFIRE 2023 fuel models + canopy, CONUS). |
+| `--no-crown-fire` | no | Zero the canopy layers (surface fire only; also removes canopy wind sheltering). |
 | `--output-name NAME`, `-o NAME` | yes | Output GeoTIFF filename (a `.tif` extension is added if missing). |
 | `--summary-json PATH` | no | Also write a JSON summary (scenario, stats, grid, weather source used). |
 | `--mock` | no | Skip Earth Engine and pyretechnics; write a synthetic result with the same format, in seconds. |

@@ -4,7 +4,7 @@ import numpy as np
 import pyretechnics.eulerian_level_set as els
 from pyretechnics.space_time_cube import SpaceTimeCube
 
-from . import gee, landmask, physics, weather
+from . import gee, landmask, physics, severity, weather
 
 DAY_MINUTES = 1440.0
 
@@ -128,6 +128,7 @@ def compute_stats(matrices, scale, result):
     flame = matrices["flame_length"][burned]
     spread = matrices["spread_rate"][burned]
     return {
+        "severity": severity.summarize(matrices, scale),
         "burned_cells": n_burned,
         "burned_hectares": n_burned * cell_ha,
         "burned_acres": n_burned * cell_ha * 2.47105,

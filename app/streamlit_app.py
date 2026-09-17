@@ -8,6 +8,7 @@ Run from the repo root:
 """
 
 import asyncio
+import math
 import os
 import queue
 import sys
@@ -16,6 +17,7 @@ from pathlib import Path
 
 import folium
 import streamlit as st
+from folium.plugins import Draw
 from dotenv import load_dotenv
 from streamlit_folium import st_folium
 
@@ -40,7 +42,8 @@ TOOL_LABELS = {
     "show_map": "Drawing map",
 }
 
-st.set_page_config(page_title="pyroSim", page_icon="🔥", layout="wide")
+st.set_page_config(page_title="pyroSim", page_icon="🔥", layout="wide",
+                   initial_sidebar_state="collapsed")
 
 
 # --- Agent runtime: one background event loop and runner shared by the server ---
@@ -106,6 +109,33 @@ def set_map_runs(run_ids):
     st.session_state.pending_map_select = True  # applied before the selector is drawn next run
 
 
+def drawing_bounds(drawing) -> list[float] | None:
+    """(west, south, east, north) of a drawn rectangle or polygon, or None."""
+    geometry = (drawing or {}).get("geometry") or {}
+    if geometry.get("type") not in ("Polygon", "MultiPolygon"):
+        return None
+    rings = geometry["coordinates"] if geometry["type"] == "Polygon" else [
+        ring for polygon in geometry["coordinates"] for ring in polygon]
+    points = [point for ring in rings for point in ring]
+    lons = [p[0] for p in points]
+    lats = [p[1] for p in points]
+    return [round(min(lons), 5), round(min(lats), 5), round(max(lons), 5), round(max(lats), 5)]
+
+
+def bounds_km(bounds) -> tuple[float, float]:
+    west, south, east, north = bounds
+    mid = math.radians((south + north) / 2)
+    return ((east - west) * 111.32 * math.cos(mid), (north - south) * 110.54)
+
+
+def grow_bounds(bounds, factor):
+    """Scale an area about its centre (used by the grow buttons)."""
+    west, south, east, north = bounds
+    cx, cy = (west + east) / 2, (south + north) / 2
+    half_x, half_y = (east - west) / 2 * factor, (north - south) / 2 * factor
+    return [round(cx - half_x, 5), round(cy - half_y, 5), round(cx + half_x, 5), round(cy + half_y, 5)]
+
+
 def finished_runs():
     return [r for r in tools.list_runs(limit=50)["runs"] if r["status"] == "done"]
 
@@ -148,12 +178,49 @@ def handle_event(event, activity, status, reply_parts):
         reply_parts.extend(part.text for part in event.content.parts if part.text)
 
 
+def ui_context_blocks() -> list[str]:
+    """What the user picked in the UI, as instructions prepended to their message.
+
+    Order matters: a drawn area overrides an example fire's default area, and a clicked point
+    overrides its suggested ignition. Every block is combined — never replace one with another.
+    """
+    blocks = []
+    fire = st.session_state.get("example_fire")
+    aoi = st.session_state.get("drawn_aoi")
+    picked = st.session_state.picked if st.session_state.get("attach_click", True) else None
+
+    if fire and fire != "—":
+        scenario = tools.list_example_fires()["fires"][fire]
+        west, south, east, north = scenario["aoi_bounds"]
+        lon, lat = scenario["ignition_lonlat"]
+        area = "" if aoi else (f"area west={west}, south={south}, east={east}, north={north}; ")
+        ignition = "" if picked else f"ignition_lon={lon}, ignition_lat={lat}; "
+        blocks.append(
+            f"[Example fire selected in the UI: {fire} ({scenario['incident_name']}). Use {area}"
+            f"{ignition}ignition_date={scenario['ignition_date']}. Pass observed_fire=\"{fire}\" to "
+            f"show_map so the real perimeters are drawn. Observed growth "
+            f"{scenario['first_acres']:,} -> {scenario['final_acres']:,} acres over "
+            f"{scenario['observed_days']} days; compare the simulation with that.]"
+        )
+    if aoi:
+        width_km, height_km = bounds_km(aoi)
+        blocks.append(
+            f"[Area of interest drawn on the map: west={aoi[0]}, south={aoi[1]}, east={aoi[2]}, "
+            f"north={aoi[3]} ({width_km:.0f} x {height_km:.0f} km). Use exactly these bounds, "
+            f"overriding any other area, and do not ask to confirm them.]"
+        )
+    if picked:
+        lat, lon = picked
+        extra = "" if aoi else " If no area is given, choose one generously around it."
+        blocks.append(f"[Ignition point clicked on the map: ignition_lon={lon:.5f}, "
+                      f"ignition_lat={lat:.5f}. Use it as the ignition.{extra}]")
+    return blocks
+
+
 def chat_turn(prompt: str):
-    text = prompt
-    if st.session_state.picked and st.session_state.get("attach_click", True):
-        lat, lon = st.session_state.picked
-        text = (f"{prompt}\n\n[Map click: ignition point lon={lon:.5f}, lat={lat:.5f}. Use it as the "
-                "ignition if the question needs one; propose a bounding box around it if none is given.]")
+    blocks = ui_context_blocks()
+    text = "\n".join(blocks + ["", prompt]) if blocks else prompt
+    if st.session_state.get("attach_click", True):
         st.session_state.picked = None
     st.session_state.messages.append({"role": "user", "content": prompt})
 
@@ -212,16 +279,21 @@ def sidebar():
                 date = st.text_input("Ignition date", "2024-08-15")
                 days = st.number_input("Projection days", min_value=1, max_value=15, value=2)
                 weather = st.selectbox("Weather", ["gridmet", "weathernext"])
+                fuels = st.selectbox("Fuels", ["landfire", "nlcd"],
+                                     help="landfire: LANDFIRE 2023 fuels + canopy (CONUS). nlcd: old crosswalk.")
+                crown = st.checkbox("Crown fire", value=True)
                 label = st.text_input("Label", "manual run")
                 confirm = st.checkbox("Confirm large request")
                 if st.form_submit_button("Run", use_container_width=True):
                     area = areas[area_key]
                     lon, lat = area["ignition_lonlat"]
+                    if st.session_state.get("drawn_aoi"):
+                        area = {**area, "bounds": st.session_state.drawn_aoi}
                     if use_click and picked:
                         lat, lon = picked
                     with st.spinner("Running pyroSim…"):
                         result = tools.run_simulation(*area["bounds"], lon, lat, date, int(days), weather,
-                                                      label, confirm)
+                                                      fuels, crown, label, confirm)
                     if result["status"] == "done":
                         set_map_runs(st.session_state.map_runs + [result["run_id"]])
                         st.rerun()
@@ -229,18 +301,74 @@ def sidebar():
                         st.error(result.get("error") or result.get("reason"))
 
 
-def base_map():
-    area = tools.list_example_areas()["areas"]["sierra_example"]
-    west, south, east, north = area["bounds"]
-    fmap = folium.Map(location=[(south + north) / 2, (west + east) / 2], zoom_start=11, tiles=None,
-                      control_scale=True)
+@st.cache_data(show_spinner="Building the full map…", max_entries=8)
+def full_map_html(run_ids: tuple, fire: str, max_hours: int) -> str:
+    """Self-contained map HTML (embedded imagery, daily fronts, severity, summary panel).
+
+    Cached on the run ids, since it refetches basemap imagery each time it is built.
+    """
+    records = [tools.load_run_record(r) for r in run_ids]
+    observed = maps.observed_features(fire) if fire else None
+    return maps.build_folium_map(records, max_hours, observed=observed,
+                                 standalone=True).get_root().render()
+
+
+def base_map(bounds=None, observed=None, show_bounds=False):
+    """Imagery map framed on an area.
+
+    show_bounds stays False for an example fire: drawing its extent would look like an area of
+    interest is already set, when the user still has to draw one (or let the agent choose).
+    """
+    if bounds is None:
+        bounds = tools.list_example_areas()["areas"]["sierra_example"]["bounds"]
+    west, south, east, north = bounds
+    fmap = folium.Map(location=[(south + north) / 2, (west + east) / 2], tiles=None, control_scale=True)
     folium.TileLayer(maps.ESRI_IMAGERY, attr=maps.ESRI_ATTRIBUTION, name="Aerial imagery").add_to(fmap)
     folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(fmap)
+    if show_bounds:
+        folium.Rectangle([[south, west], [north, east]], color="#3388ff", fill=False, weight=2,
+                         tooltip="Area of interest").add_to(fmap)
+    maps.add_observed_layer(fmap, observed)
     folium.LayerControl(collapsed=False).add_to(fmap)
+    fmap.fit_bounds([[south, west], [north, east]])
     return fmap
 
 
+def example_fire_panel():
+    """Pick a real 2024 fire: frames the map on it, suggests its ignition point, offers the overlay."""
+    fires = tools.list_example_fires()["fires"]
+    names = ["—"] + list(fires)
+    chosen = st.selectbox(
+        "Example fire (real 2024 growth data)", names, key="example_fire",
+        format_func=lambda n: "—" if n == "—" else
+        f"{fires[n]['incident_name'].title()} · {fires[n]['ignition_date']} · "
+        f"{fires[n]['first_acres']:,} → {fires[n]['final_acres']:,} ac",
+    )
+    if chosen == "—":
+        return None, None
+
+    fire = fires[chosen]
+    if st.session_state.get("framed_fire") != chosen:
+        st.session_state.framed_fire = chosen
+        st.session_state.picked = tuple(reversed(fire["ignition_lonlat"]))  # (lat, lon)
+        st.rerun()
+
+    cols = st.columns([3, 2])
+    cols[0].caption(
+        f"Observed {fire['first_acres']:,} → {fire['final_acres']:,} ac over {fire['observed_days']} days "
+        f"({fire['first_observation'][:10]} → {fire['last_observation'][:10]}). "
+        f"Suggested ignition {fire['ignition_lonlat'][1]:.4f}, {fire['ignition_lonlat'][0]:.4f}."
+    )
+    overlay = cols[1].checkbox("Overlay observed perimeters", value=True, key="overlay_observed")
+    if fire["first_acres"] > 1000:
+        st.caption(f"⚠️ The first mapped perimeter is already {fire['first_acres']:,} ac, so a run from a "
+                   "single ignition point is not directly comparable.")
+    st.caption("Now ask in the chat, e.g. *“Run this fire for 10 days with gridmet.”*")
+    return chosen, (maps.observed_features(chosen) if overlay else None)
+
+
 def map_panel():
+    fire, observed_features = example_fire_panel()
     runs = finished_runs()
     runs_by_id = {r["run_id"]: r for r in runs}
     if st.session_state.pop("pending_map_select", False) or "map_select" not in st.session_state:
@@ -257,16 +385,63 @@ def map_panel():
         controls = st.columns([4, 1])
         until = controls[0].slider("Hours after ignition", 0, max_hours, max_hours, step=1)
         show_all = controls[1].checkbox("All layers", value=False, help="Show every run at once")
-        fmap = maps.build_folium_map(records, max_hours, until_hours=until, show_all=show_all)
+        fmap = maps.build_folium_map(records, max_hours, until_hours=until, show_all=show_all,
+                                     observed=observed_features)
     else:
-        fmap = base_map()
+        bounds = tools.list_example_fires()["fires"][fire]["aoi_bounds"] if fire else None
+        fmap = base_map(bounds, observed_features)
     if st.session_state.picked:
         lat, lon = st.session_state.picked
         folium.Marker([lat, lon], tooltip="Picked ignition", icon=folium.Icon(color="orange", icon="crosshairs",
                                                                            prefix="fa")).add_to(fmap)
 
-    clicked = st_folium(fmap, height=560, use_container_width=True, returned_objects=["last_clicked"],
-                        key="map")
+    drawn = st.session_state.get("drawn_aoi")
+    if drawn:
+        folium.Rectangle([[drawn[1], drawn[0]], [drawn[3], drawn[2]]], color="#ffb300", weight=3,
+                         fill=False, tooltip="Drawn area of interest").add_to(fmap)
+    Draw(export=False, position="topleft",
+         draw_options={"rectangle": {"shapeOptions": {"color": "#ffb300"}}, "polygon": False,
+                       "polyline": False, "circle": False, "marker": False, "circlemarker": False},
+         edit_options={"edit": False}).add_to(fmap)
+
+    live_tab, full_tab = st.tabs(["Live map", "Full map (all layers)"])
+    with full_tab:
+        if records:
+            fire_key = fire if (fire and st.session_state.get("overlay_observed", True)) else ""
+            html = full_map_html(tuple(selected), fire_key, max_hours)
+            st.iframe(html, height=620)  # our own HTML, built from run outputs
+            st.download_button("Download this map (HTML)", html, file_name=f"{selected[0]}_map.html",
+                               mime="text/html", use_container_width=True,
+                               help="Self-contained: imagery is embedded, so it opens offline.")
+            st.caption("Layers: arrival time, burned by each day, flame-length bands, observed "
+                       "perimeters by mapping. Same file the agent writes to runs/<run_id>/map.html.")
+        else:
+            st.info("Run a simulation to see the full map with day-by-day and severity layers.")
+
+    with live_tab:
+        clicked = st_folium(fmap, height=560, use_container_width=True,
+                            returned_objects=["last_clicked", "last_active_drawing"], key="map")
+    drawing = drawing_bounds((clicked or {}).get("last_active_drawing"))
+    if drawing and drawing != st.session_state.get("drawn_aoi"):
+        st.session_state.drawn_aoi = drawing
+        st.rerun()
+
+    if st.session_state.get("drawn_aoi"):
+        aoi = st.session_state.drawn_aoi
+        width_km, height_km = bounds_km(aoi)
+        cols = st.columns([3, 1, 1, 1])
+        cols[0].caption(f"▭ Drawn area: {width_km:.0f} × {height_km:.0f} km "
+                        f"({aoi[0]:.3f}, {aoi[1]:.3f}) → ({aoi[2]:.3f}, {aoi[3]:.3f}) — the agent uses this")
+        if cols[1].button("Grow 1.5×", use_container_width=True):
+            st.session_state.drawn_aoi = grow_bounds(aoi, 1.5)
+            st.rerun()
+        if cols[2].button("Grow 2×", use_container_width=True):
+            st.session_state.drawn_aoi = grow_bounds(aoi, 2.0)
+            st.rerun()
+        if cols[3].button("Clear area", use_container_width=True):
+            st.session_state.drawn_aoi = None
+            st.rerun()
+
     point = (clicked or {}).get("last_clicked")
     if point and st.session_state.get("last_click_seen") != point:
         st.session_state.last_click_seen = point
@@ -288,15 +463,31 @@ def map_panel():
             title = record.get("label") or record["run_id"]
             st.markdown(f"**{title}**" + ("  ·  :orange[MOCK — synthetic]" if record["mode"] == "mock" else ""))
             growth_24 = next((g for g in record["growth"] if g["hours_after_ignition"] == 24), None)
-            metrics = st.columns(4)
+            crown = summary.get("passive_crown_cells", 0) + summary.get("active_crown_cells", 0)
+            metrics = st.columns(5)
             metrics[0].metric("Burned", f"{summary['burned_hectares']:,.0f} ha", f"{summary['burned_acres']:,.0f} ac",
                               delta_color="off")
             metrics[1].metric("By 24 h", f"{growth_24['burned_hectares']:,.0f} ha" if growth_24 else "—")
             metrics[2].metric("Max flame length", f"{summary['max_flame_length_m']:.1f} m")
-            metrics[3].metric("Cell size", f"{summary['cell_size_m']:.0f} m")
+            metrics[3].metric("Crown fire", f"{crown:,} cells" if crown else "none",
+                              f"{summary.get('active_crown_cells', 0):,} active" if crown else None,
+                              delta_color="off")
+            metrics[4].metric("Cell size", f"{summary['cell_size_m']:.0f} m")
+            if (record.get("edge") or {}).get("reached_area_edge"):
+                st.warning("Fire reached the edge of the area — burned area is an underestimate. "
+                           "Draw a bigger area, or use Grow 2×, and rerun.", icon="⚠️")
+            severity = summary.get("severity")
+            if severity:
+                bands = severity["flame_length_bands"]
+                st.caption("Flame length: " + " · ".join(
+                    f"{b['band']} {b['fraction_of_burned']:.0%}" for b in bands if b["fraction_of_burned"]))
+                st.progress(min(sum(b["fraction_of_burned"] for b in bands if b["lower_ft"] >= 8.0), 1.0),
+                            text=f"{sum(b['fraction_of_burned'] for b in bands if b['lower_ft'] >= 8.0):.0%} "
+                                 "of burned area at 8 ft+ (no direct attack at the head)")
             scenario = record["scenario"]
             st.caption(f"{scenario['ignition_date']} · {scenario['projection_days']} d · "
-                       f"weather {record.get('weather_source_used')} · {record['run_id']}")
+                       f"weather {record.get('weather_source_used')} · "
+                       f"fuels {record.get('fuel_source_used', '—')} · {record['run_id']}")
 
 
 def chat_panel():
@@ -323,10 +514,23 @@ def chat_panel():
             chat_turn(prompt)
 
 
+LAYOUTS = {"Split": [3, 2], "Map focus": [1, 0], "Chat focus": [2, 3]}
+
+
 def main():
     init_state()
     sidebar()
-    map_column, chat_column = st.columns([3, 2], gap="medium")
+    header = st.columns([2, 3])
+    layout = header[0].segmented_control("Layout", list(LAYOUTS), default="Split", key="layout",
+                                         help="Map focus hides the chat; the sidebar collapses with «")
+    header[1].caption("Sidebar « top-left: mode, runs without the agent. Chat keeps its history "
+                      "when you switch layout.")
+    ratios = LAYOUTS.get(layout or "Split")
+
+    if ratios[1] == 0:
+        map_panel()
+        return
+    map_column, chat_column = st.columns(ratios, gap="medium")
     with map_column:
         map_panel()
     with chat_column:

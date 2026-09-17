@@ -21,10 +21,12 @@ root_agent = llm_agent.Agent(
     instruction=prompts.root_prompt,
     tools=[
         tools.list_example_areas,
+        tools.list_example_fires,
         tools.run_simulation,
         tools.get_run,
         tools.list_runs,
         tools.compare_runs,
+        tools.severity_summary,
         tools.show_map,
     ],
 )

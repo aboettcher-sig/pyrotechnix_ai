@@ -191,7 +191,7 @@ align → mask → SpaceTimeCubes) → `spread_fire_with_phi_field` → `get_ful
 | `projection_days` | — | projection horizon (days) |
 | `ee_project` | `$EE_PROJECT` | Earth Engine project (read from `.env`) |
 | `fuel_source` | `landfire` | `landfire` (LANDFIRE 2023) \| `nlcd` (crosswalk, constant canopy) |
-| `enable_crown_fire` | `True` | `False` zeroes canopy layers (surface fire only) |
+| `enable_crown_fire` | `True` | `False` zeroes canopy layers (surface fire only; also removes canopy wind sheltering) |
 | `weather_source` | `gridmet` | `gridmet` \| `weathernext` |
 | `weathernext_stat` | `mean` | ensemble statistic |
 | `weathernext_step_hours` | `6` | forecast sampling step (fewer bands = smaller download) |

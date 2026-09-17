@@ -27,13 +27,18 @@ from google.genai import types
 from . import maps
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:  # firesim lives at the repo root, next to agents/
+    sys.path.insert(0, str(REPO_ROOT))
+
+from firesim import observed  # noqa: E402
+
 RUNS_DIR = Path(os.environ.get("PYROSIM_RUNS_DIR", REPO_ROOT / "runs"))
 NODATA = -999.0
 ACRES_PER_HECTARE = 2.47105
 
 # Cost gate: bigger requests return an estimate and need confirm=True.
-MAX_SPAN_DEG = 0.5
-MAX_PROJECTION_DAYS = 7
+MAX_SPAN_DEG = 0.6
+MAX_PROJECTION_DAYS = 14   # 10-day scenarios are the point; gate only what is genuinely expensive
 REAL_RUN_TIMEOUT_S = 1800
 MAX_MAP_RUNS = 4
 
@@ -88,10 +93,26 @@ def _growth_profile(tif_path: Path, cell_size_m: float, projection_days: int) ->
     return profile
 
 
+def _edge_limited(tif_path: Path) -> dict:
+    """Did the fire reach the edge of the area? If so the burned area is an underestimate."""
+    with rasterio.open(tif_path) as dataset:
+        hours = dataset.read(1)
+    burned = hours != NODATA
+    border = np.zeros_like(burned)
+    border[0, :] = border[-1, :] = border[:, 0] = border[:, -1] = True
+    edge_cells = int(np.count_nonzero(burned & border))
+    return {
+        "reached_area_edge": edge_cells > 0,
+        "edge_cells": edge_cells,
+        "note": ("The fire reached the edge of the area, so burned area is an underestimate: "
+                 "rerun with a larger area." if edge_cells else ""),
+    }
+
+
 def _public_record(record: dict) -> dict:
     """The part of a run record worth showing the model (no absolute paths or raw logs)."""
     keys = ("run_id", "label", "status", "mode", "created_at", "scenario", "weather_source_used",
-            "summary", "growth", "grid", "error")
+            "fuel_source_used", "summary", "growth", "edge", "grid", "error")
     return {k: record[k] for k in keys if k in record}
 
 
@@ -104,6 +125,34 @@ def list_example_areas() -> dict:
     return {"areas": EXAMPLE_AREAS}
 
 
+def list_example_fires() -> dict:
+    """List real 2024 fires with observed growth we can simulate and compare against.
+
+    Each entry gives a ready-to-run scenario (area of interest, ignition point inside the first
+    mapped perimeter, ignition date) plus the observed timeline: how many acres had burned at each
+    mapped observation. Use it when the user names one of these fires, then call run_simulation
+    with those values and show_map with observed_fire set to draw the real perimeters.
+    """
+    fires = {}
+    for name in observed.available_fires():
+        scenario = observed.scenario(name)
+        fires[name] = {
+            "incident_name": scenario["incident_name"],
+            "aoi_bounds": scenario["aoi_bounds"],
+            "ignition_lonlat": scenario["ignition_lonlat"],
+            "ignition_date": scenario["ignition_date"],
+            "first_observation": scenario["first_observation"],
+            "last_observation": scenario["last_observation"],
+            "observed_days": scenario["observed_days"],
+            "first_acres": scenario["first_acres"],
+            "final_acres": scenario["final_acres"],
+            "observations": scenario["observations"],
+            "note": ("The first mapped perimeter already covers first_acres, so a simulation from a "
+                     "single ignition point is only comparable when first_acres is small."),
+        }
+    return {"fires": fires}
+
+
 def run_simulation(
     west: float,
     south: float,
@@ -114,6 +163,8 @@ def run_simulation(
     ignition_date: str,
     projection_days: int,
     weather_source: str = "gridmet",
+    fuel_source: str = "landfire",
+    crown_fire: bool = True,
     label: str = "",
     confirm: bool = False,
 ) -> dict:
@@ -127,26 +178,31 @@ def run_simulation(
         projection_days: Whole days to simulate (>= 1).
         weather_source: "gridmet" (daily historical, 1979 to present) or "weathernext"
             (recent forecast; falls back to gridmet when no forecast covers the date).
+        fuel_source: "landfire" (LANDFIRE 2023 fuel models and canopy, 30 m, CONUS only) or
+            "nlcd" (coarse land-cover crosswalk, no canopy). Keep landfire unless asked.
+        crown_fire: False zeroes the canopy so only surface fire spreads. Note this also removes
+            the canopy's wind sheltering, so a surface-only run often spreads faster, not slower;
+            it is not a clean crown-fire on/off switch.
         label: Short human-readable name for this run, e.g. "baseline" or "3-day horizon".
         confirm: Set True only after the user approved a run that returned needs_confirmation.
 
     Returns:
         A record with run_id, status ("done", "error" or "needs_confirmation"), scenario,
-        summary stats (burned hectares/acres, max flame length, mean spread rate, cell size),
-        growth (burned area at checkpoint hours) and mode ("mock" or "real").
+        summary stats (burned hectares/acres, crown-fire cells, max flame length, mean spread
+        rate, cell size), growth (burned area at checkpoint hours) and mode ("mock" or "real").
     """
+    mode = _mode()
     span = max(east - west, north - south)
-    if not confirm and (span > MAX_SPAN_DEG or projection_days > MAX_PROJECTION_DAYS):
+    over_budget = span > MAX_SPAN_DEG or projection_days > MAX_PROJECTION_DAYS
+    if mode == "real" and not confirm and over_budget:  # mock runs are seconds; never gate them
         return {
             "status": "needs_confirmation",
             "reason": (f"Request exceeds the default budget (area span {span:.2f} deg, limit "
                        f"{MAX_SPAN_DEG}; {projection_days} days, limit {MAX_PROJECTION_DAYS})."),
-            "estimate": "Real runs of this size can take many minutes; the grid is capped at "
+            "estimate": "Real runs of this size can take several minutes; the grid is capped at "
                         "160 cells per side, so a larger area also means coarser cells.",
             "next_step": "Ask the user to confirm, then call again with confirm=True.",
         }
-
-    mode = _mode()
     run_id = f"run_{datetime.now(timezone.utc):%Y%m%dT%H%M%S}_{uuid.uuid4().hex[:6]}"
     run_dir = _run_dir(run_id)
     run_dir.mkdir(parents=True, exist_ok=True)
@@ -160,9 +216,12 @@ def run_simulation(
         "--ignition-date", ignition_date,
         "--projection-days", str(projection_days),
         "--weather-source", weather_source,
+        "--fuel-source", fuel_source,
         "--output-name", str(tif_path),
         "--summary-json", str(summary_path),
     ]
+    if not crown_fire:
+        command.append("--no-crown-fire")
     if mode != "real":
         command.append("--mock")
 
@@ -178,6 +237,8 @@ def run_simulation(
             "ignition_date": ignition_date,
             "projection_days": projection_days,
             "weather_source": weather_source,
+            "fuel_source": fuel_source,
+            "crown_fire": crown_fire,
         },
     }
 
@@ -198,6 +259,7 @@ def run_simulation(
         record.update(
             status="done",
             weather_source_used=summary["weather_source_used"],
+            fuel_source_used=summary.get("fuel_source_used", fuel_source),
             grid=summary["grid"],
             output_path=str(tif_path),
             summary={
@@ -205,16 +267,44 @@ def run_simulation(
                 "burned_acres": round(stats["burned_acres"], 1),
                 "max_flame_length_m": round(stats["max_flame_length_m"], 2),
                 "mean_spread_rate_m_min": round(stats["mean_spread_rate_m_min"], 2),
+                "passive_crown_cells": stats.get("passive_crown_cells", 0),
+                "active_crown_cells": stats.get("active_crown_cells", 0),
+                "severity": stats.get("severity"),
                 "cell_size_m": round(stats["cell_size_m"], 1),
                 "stop_condition": stats["stop_condition"],
             },
             growth=_growth_profile(tif_path, stats["cell_size_m"], projection_days),
+            edge=_edge_limited(tif_path),
         )
 
     if completed is not None:
         (run_dir / "pyrosim.log").write_text(completed.stdout + completed.stderr)
     (run_dir / "run.json").write_text(json.dumps(record, indent=2))
     return _public_record(record)
+
+
+def severity_summary(run_id: str) -> dict:
+    """Fire intensity for a finished run: flame-length bands, intensity percentiles, crown fire.
+
+    Bands are the standard suppression reading: under 4 ft hand crews can hold it; 4-8 ft needs
+    dozers, engines or aircraft; 8-11 ft means torching and spotting with head attack likely
+    ineffective; over 11 ft means major runs. This is modeled fireline intensity and flame length,
+    NOT ecological burn severity (BARC/dNBR) — say so when reporting it.
+    """
+    record = _load_record(run_id)
+    if record is None or record.get("status") != "done":
+        return {"status": "error", "error": f"No finished run with id {run_id!r}."}
+    severity = (record.get("summary") or {}).get("severity")
+    if not severity:
+        return {"status": "error", "error": "This run predates intensity export; run it again."}
+    return {
+        "status": "done",
+        "run_id": run_id,
+        "label": record.get("label", ""),
+        "mode": record.get("mode"),
+        "burned_hectares": record["summary"]["burned_hectares"],
+        **severity,
+    }
 
 
 def get_run(run_id: str) -> dict:
@@ -259,6 +349,7 @@ def compare_runs(run_ids: list[str]) -> dict:
             "label": record.get("label", ""),
             "scenario": record["scenario"],
             "weather_source_used": record.get("weather_source_used"),
+            "fuel_source_used": record.get("fuel_source_used"),
             "summary": record["summary"],
             "growth": record["growth"],
         })
@@ -282,13 +373,14 @@ def compare_runs(run_ids: list[str]) -> dict:
     return result
 
 
-async def show_map(run_ids: list[str], tool_context: ToolContext = None) -> dict:
+async def show_map(run_ids: list[str], observed_fire: str = "", tool_context: ToolContext = None) -> dict:
     """Draw finished runs on a map: an image shown in the chat plus an interactive HTML map.
 
     Use after run_simulation or compare_runs whenever the user wants to see where the fire goes.
     Pass up to 4 run ids; each run gets its own panel in the image and its own toggleable layer
     in the HTML map. Colors are hours after ignition on one shared scale, with white perimeter
-    lines at 6 h, 12 h and every 24 h.
+    lines at 6 h, 12 h and every 24 h. Set observed_fire (from list_example_fires) to draw that
+    fire's real mapped perimeters in cyan on top, for a visual check against what happened.
 
     Returns:
         status, image_artifact (the image shown in the chat), html_path and html_url (open in a
@@ -317,8 +409,9 @@ async def show_map(run_ids: list[str], tool_context: ToolContext = None) -> dict
     png_path, html_path = out_dir / f"{stem}.png", out_dir / f"{stem}.html"
     max_hours = max(run["scenario"]["projection_days"] for run in runs) * 24.0
 
-    basemap = await asyncio.to_thread(maps.render_png, runs, png_path, max_hours)
-    await asyncio.to_thread(maps.render_html, runs, html_path, max_hours)
+    features = observed.perimeter_features(observed_fire) if observed_fire else None
+    basemap = await asyncio.to_thread(maps.render_png, runs, png_path, max_hours, features)
+    await asyncio.to_thread(maps.render_html, runs, html_path, max_hours, features)
 
     artifact_name = None
     if tool_context is not None:
@@ -334,5 +427,6 @@ async def show_map(run_ids: list[str], tool_context: ToolContext = None) -> dict
         "html_path": str(html_path),
         "html_url": html_path.resolve().as_uri(),
         "basemap": basemap,
+        "observed_fire": observed_fire or None,
         "runs": [{"run_id": r["run_id"], "label": r.get("label", ""), "mode": r.get("mode")} for r in runs],
     }

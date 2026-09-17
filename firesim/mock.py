@@ -61,6 +61,7 @@ def run_simulation(config):
         "fire_type": burned.astype("uint8"),
         "spread_rate": np.where(burned, spread_rate, 0.0).astype("float32"),
         "flame_length": np.where(burned, 0.5 + 0.8 * spread_rate, 0.0).astype("float32"),
+        "fireline_intensity": np.where(burned, 260.0 * (0.5 + 0.8 * spread_rate) ** 2.17, 0.0).astype("float32"),
     }
     meta = {
         "scale": scale,
@@ -68,6 +69,7 @@ def run_simulation(config):
         "cols": cols,
         "start_minutes": start_minutes,
         "weather_source": f"mock ({config.weather_source})",
+        "fuel_source": f"mock ({config.fuel_source})",
         "non_land_mask": None,
     }
     stats = compute_stats(matrices, scale, {"stop_condition": "max duration reached"})

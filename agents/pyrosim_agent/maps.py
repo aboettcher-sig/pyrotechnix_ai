@@ -4,9 +4,12 @@ Both read only what the CLI wrote: the hours-before-burn GeoTIFF and the run rec
 hours after ignition on one shared scale, so runs with different horizons stay comparable.
 """
 
+import base64
 import io
 import math
+import sys
 from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 
 import branca.colormap
 import folium
@@ -19,6 +22,12 @@ import requests
 from matplotlib import colormaps, colors
 from matplotlib import pyplot as plt
 from PIL import Image
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+if str(REPO_ROOT) not in sys.path:  # firesim lives at the repo root, next to agents/
+    sys.path.insert(0, str(REPO_ROOT))
+
+from firesim import observed as observed_fires, severity  # noqa: E402
 
 NODATA = -999.0
 CMAP = "YlOrRd_r"  # early arrival = dark red, late arrival = pale yellow
@@ -34,6 +43,16 @@ def read_hours(tif_path) -> np.ndarray:
         hours = dataset.read(1).astype("float32")
     hours[hours == NODATA] = np.nan
     return hours
+
+
+def read_band(tif_path, name: str) -> np.ndarray:
+    """One exported band by its description, NaN where the cell never burns."""
+    with rasterio.open(tif_path) as dataset:
+        if name not in (dataset.descriptions or ()):
+            raise ValueError(f"{tif_path} has no band {name!r} (has {dataset.descriptions}).")
+        values = dataset.read(dataset.descriptions.index(name) + 1).astype("float32")
+    values[values == NODATA] = np.nan
+    return values
 
 
 def _checkpoint_levels(max_hours: float) -> list[int]:
@@ -82,10 +101,11 @@ def fetch_basemap(bounds, target_px=900):
 
 # --- Static PNG ---
 
-def render_png(runs, path, max_hours):
+def render_png(runs, path, max_hours, observed=None):
     """One panel per run: basemap, arrival hours, checkpoint perimeters, ignition, AOI.
 
-    `runs` is a list of run records (with output_path). Returns a note about the basemap.
+    `runs` is a list of run records (with output_path); `observed` is a list of observed-perimeter
+    features (firesim.observed.perimeter_features) drawn as cyan outlines. Returns a basemap note.
     """
     ncols = min(len(runs), 2)
     nrows = math.ceil(len(runs) / ncols)
@@ -120,6 +140,26 @@ def render_png(runs, path, max_hours):
                                   colors="white", linewidths=0.9)
             ax.clabel(contours, fmt=lambda h: f"{h:.0f} h", fontsize=7, colors="white")
 
+        labelled = set()
+        for index, feature in enumerate(observed or []):
+            last = index == len(observed) - 1
+            shade = colormaps["cool"](index / max(len(observed) - 1, 1))  # cyan (first) -> magenta (last)
+            style = {"linewidth": 2.0, "alpha": 0.95} if last else {"linewidth": 1.0, "alpha": 0.8}
+            day = feature["hours_after_start"] / 24.0
+            kind = "final" if last else "earlier"
+            for ring in _exterior_rings(feature["geojson"]):
+                label = None if kind in labelled else (
+                    f"observed final, day {day:.1f} ({feature['acres']:,.0f} ac)" if last
+                    else f"observed by day (first: {feature['acres']:,.0f} ac)")
+                labelled.add(kind)
+                ax.plot(*zip(*ring), color=shade, label=label, **style)
+            top = max(_exterior_rings(feature["geojson"]), key=lambda ring: max(y for _, y in ring))
+            x, y = max(top, key=lambda point: point[1])
+            ax.annotate(f"d{day:.0f}", (x, y), color=shade, fontsize=6, fontweight="bold",
+                        ha="center", va="bottom")
+        if observed:
+            ax.legend(loc="lower left", fontsize=7, framealpha=0.6)
+
         ax.add_patch(plt.Rectangle((west, south), east - west, north - south,
                                    fill=False, edgecolor="#3388ff", linewidth=1.5))
         lon, lat = run["scenario"]["ignition_lonlat"]
@@ -148,13 +188,23 @@ def render_png(runs, path, max_hours):
     return basemap_note
 
 
+def _exterior_rings(geometry):
+    """Exterior rings of a (Multi)Polygon GeoJSON geometry as lists of (lon, lat)."""
+    polygons = geometry["coordinates"] if geometry["type"] == "MultiPolygon" else [geometry["coordinates"]]
+    return [[(x, y) for x, y, *_ in polygon[0]] for polygon in polygons]
+
+
 # --- Interactive HTML ---
 
-def build_folium_map(runs, max_hours, until_hours=None, show_all=False, height=None):
+def build_folium_map(runs, max_hours, until_hours=None, show_all=False, height=None, observed=None,
+                     standalone=False):
     """Folium map with one toggleable arrival-time layer per run.
 
     until_hours: only draw cells that have burned by this many hours after ignition (time slider).
     show_all: show every run layer at once instead of only the first.
+    standalone: build a self-contained map for saving as HTML — embeds the imagery as an image
+        instead of tiles (tile servers refuse requests from file:// pages), and adds the
+        severity layer, day-by-day fronts and a summary panel.
     """
     all_bounds = np.array([run["scenario"]["aoi_bounds"] for run in runs])
     west, south = all_bounds[:, 0].min(), all_bounds[:, 1].min()
@@ -163,7 +213,10 @@ def build_folium_map(runs, max_hours, until_hours=None, show_all=False, height=N
     size = {"height": height} if height else {}
     fmap = folium.Map(location=[(south + north) / 2, (west + east) / 2], tiles=None,
                       control_scale=True, **size)
-    folium.TileLayer(ESRI_IMAGERY, attr=ESRI_ATTRIBUTION, name="Aerial imagery").add_to(fmap)
+    if standalone:
+        _add_embedded_basemap(fmap, (west, south, east, north))
+    else:
+        folium.TileLayer(ESRI_IMAGERY, attr=ESRI_ATTRIBUTION, name="Aerial imagery").add_to(fmap)
     folium.TileLayer("OpenStreetMap", name="OpenStreetMap").add_to(fmap)
 
     norm = colors.Normalize(vmin=0.0, vmax=max_hours)
@@ -194,6 +247,14 @@ def build_folium_map(runs, max_hours, until_hours=None, show_all=False, height=N
         ).add_to(group)
         group.add_to(fmap)
 
+        if standalone:
+            _add_daily_fronts(fmap, run, label)
+            _add_severity_layer(fmap, run, label)
+
+    add_observed_layer(fmap, observed, until_hours)
+    if standalone:
+        _add_summary_panel(fmap, runs, observed)
+
     legend = branca.colormap.LinearColormap(
         [colors.to_hex(cmap(v)) for v in np.linspace(0, 1, 8)], vmin=0, vmax=max_hours,
         caption="Hours after ignition",
@@ -204,6 +265,141 @@ def build_folium_map(runs, max_hours, until_hours=None, show_all=False, height=N
     return fmap
 
 
-def render_html(runs, path, max_hours):
-    """Save the interactive map (first run shown, others toggleable) as a standalone HTML file."""
-    build_folium_map(runs, max_hours).save(str(path))
+def observed_features(fire: str) -> list[dict]:
+    """Observed perimeters of an example fire, ready for the map overlays."""
+    return observed_fires.perimeter_features(fire)
+
+
+def add_observed_layer(fmap, observed, until_hours=None) -> None:
+    """Add one toggleable layer per observed perimeter, coloured by time.
+
+    until_hours: hide observations made after that many hours, so the map matches the simulated
+    time slider (the observed fire as it was known at that point).
+    """
+    if not observed:
+        return
+    shown = [f for f in observed if until_hours is None or f["hours_after_start"] <= until_hours]
+    for index, feature in enumerate(observed):
+        if feature not in shown:
+            continue
+        last = index == len(observed) - 1
+        color = colors.to_hex(colormaps["cool"](index / max(len(observed) - 1, 1)))
+        day = feature["hours_after_start"] / 24.0
+        group = folium.FeatureGroup(
+            name=f"Observed day {day:.1f} ({feature['acres']:,.0f} ac)",
+            show=last or feature is shown[-1],
+        )
+        folium.GeoJson(
+            feature["geojson"],
+            style_function=lambda _, color=color, last=last: {
+                "color": color, "weight": 3 if last else 2, "fill": False,
+                "dashArray": None if last else "5,4", "opacity": 0.95,
+            },
+            tooltip=f"Observed {feature['label']} (+{feature['hours_after_start']:.0f} h)",
+        ).add_to(group)
+        group.add_to(fmap)
+
+
+def _png_data_uri(rgb: np.ndarray) -> str:
+    buffer = io.BytesIO()
+    Image.fromarray(rgb).save(buffer, format="PNG")
+    return "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+
+
+def _add_embedded_basemap(fmap, bounds) -> None:
+    """Imagery as one embedded picture, so the saved HTML needs no tile server."""
+    west, south, east, north = bounds
+    try:
+        image = fetch_basemap(bounds)
+    except Exception:
+        return
+    folium.raster_layers.ImageOverlay(
+        image=_png_data_uri(image), bounds=[[south, west], [north, east]],
+        name="Aerial imagery (embedded)", overlay=False, show=True,
+    ).add_to(fmap)
+
+
+def _add_daily_fronts(fmap, run, label) -> None:
+    """One layer per simulated day: everything burned by the end of that day."""
+    w, s, e, n = run["scenario"]["aoi_bounds"]
+    hours = read_hours(run["output_path"])
+    days = run["scenario"]["projection_days"]
+    shades = colormaps[CMAP]
+    for day in range(1, days + 1):
+        burned_by = np.isfinite(hours) & (hours <= day * 24)
+        if not burned_by.any():
+            continue
+        rgba = np.zeros((*hours.shape, 4), dtype="uint8")
+        rgba[..., :3] = (np.array(colors.to_rgb(shades((day - 1) / max(days - 1, 1)))) * 255).astype("uint8")
+        rgba[..., 3] = np.where(burned_by, 190, 0)
+        group = folium.FeatureGroup(name=f"{label}: burned by day {day}", show=False)
+        folium.raster_layers.ImageOverlay(image=rgba, bounds=[[s, w], [n, e]],
+                                          mercator_project=True).add_to(group)
+        group.add_to(fmap)
+
+
+def _add_severity_layer(fmap, run, label) -> None:
+    """Flame length in operational bands: green / yellow / orange / red."""
+    try:
+        flame_m = read_band(run["output_path"], "flame_length_m")
+    except (ValueError, KeyError):
+        return  # run predates the multi-band export
+    flame_ft = flame_m * severity.FEET_PER_METRE
+    palette = ["#2ca25f", "#fed976", "#fd8d3c", "#e31a1c"]
+    rgba = np.zeros((*flame_ft.shape, 4), dtype="uint8")
+    for (lower, upper, _, _), color in zip(severity.FLAME_LENGTH_BANDS, palette):
+        in_band = np.isfinite(flame_ft) & (flame_ft >= lower) & (flame_ft < upper)
+        rgba[in_band, :3] = (np.array(colors.to_rgb(color)) * 255).astype("uint8")
+        rgba[in_band, 3] = 200
+    w, s, e, n = run["scenario"]["aoi_bounds"]
+    group = folium.FeatureGroup(name=f"{label}: flame length bands", show=False)
+    folium.raster_layers.ImageOverlay(image=rgba, bounds=[[s, w], [n, e]],
+                                      mercator_project=True).add_to(group)
+    group.add_to(fmap)
+
+
+def _add_summary_panel(fmap, runs, observed=None) -> None:
+    """Fixed panel with headline numbers, flame-length bands and provenance."""
+    blocks = []
+    for run in runs:
+        summary = run.get("summary", {})
+        scenario = run["scenario"]
+        bands = (summary.get("severity") or {}).get("flame_length_bands", [])
+        band_html = "".join(
+            f"<div><span style='display:inline-block;width:11px;height:11px;background:{color};"
+            f"margin-right:5px'></span>{band['band']}: {band['fraction_of_burned']:.0%}</div>"
+            for band, color in zip(bands, ["#2ca25f", "#fed976", "#fd8d3c", "#e31a1c"])
+            if band["fraction_of_burned"]
+        )
+        crown = summary.get("passive_crown_cells", 0) + summary.get("active_crown_cells", 0)
+        blocks.append(
+            f"<div style='margin-bottom:8px'><b>{run.get('label') or run['run_id']}</b>"
+            f"{' <span style=\'color:#b36b00\'>MOCK</span>' if run.get('mode') == 'mock' else ''}<br>"
+            f"{summary.get('burned_hectares', 0):,.0f} ha ({summary.get('burned_acres', 0):,.0f} ac)"
+            f" · {scenario['projection_days']} d<br>"
+            f"max flame {summary.get('max_flame_length_m', 0):.1f} m · crown {crown:,} cells<br>"
+            f"{band_html}"
+            f"<span style='color:#555'>{scenario['ignition_date']} · weather "
+            f"{run.get('weather_source_used')} · fuels {run.get('fuel_source_used', '-')} · "
+            f"{summary.get('cell_size_m', 0):.0f} m cells<br>{run['run_id']}</span></div>"
+        )
+    if observed:
+        blocks.append(
+            f"<div style='border-top:1px solid #ccc;padding-top:5px'><b>Observed</b><br>"
+            f"{observed[0]['acres']:,} ac at first mapping → {observed[-1]['acres']:,} ac after "
+            f"{observed[-1]['hours_after_start'] / 24:.1f} days<br>"
+            f"<span style='color:#555'>Suppression is not modeled, so the simulation is expected to "
+            f"overpredict.</span></div>"
+        )
+    html = (
+        "<div style='position:fixed;top:12px;right:12px;z-index:9999;background:rgba(255,255,255,0.93);"
+        "padding:10px 12px;border-radius:6px;border:1px solid #bbb;font:12px/1.35 system-ui,sans-serif;"
+        "max-width:290px;max-height:78vh;overflow:auto'>" + "".join(blocks) + "</div>"
+    )
+    fmap.get_root().html.add_child(folium.Element(html))
+
+
+def render_html(runs, path, max_hours, observed=None):
+    """Save a self-contained interactive map: embedded imagery, arrival time, daily fronts,
+    flame-length bands, observed perimeters by day, and a summary panel."""
+    build_folium_map(runs, max_hours, observed=observed, standalone=True).save(str(path))
