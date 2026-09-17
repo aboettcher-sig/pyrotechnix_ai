@@ -12,13 +12,38 @@ Typical use (from the notebook)::
 
 from .config import SimulationConfig
 from .gee import initialize_ee
-from .model import run_simulation
+from .model import fetch_layers, run_simulation
+from .cache import DataStore
 from . import raster, viz
 
-__all__ = ["SimulationConfig", "run", "viz", "raster", "initialize_ee", "run_simulation"]
+__all__ = [
+    "SimulationConfig",
+    "run",
+    "prepare_data",
+    "viz",
+    "raster",
+    "DataStore",
+    "initialize_ee",
+    "run_simulation",
+]
+
+
+def _store_for(config: SimulationConfig):
+    return DataStore(config.cache_dir) if config.cache_dir else None
 
 
 def run(config: SimulationConfig):
-    """Initialize Earth Engine and run one simulation end to end."""
-    initialize_ee(config.ee_project)
-    return run_simulation(config)
+    """Run one simulation end to end (using the cache if set).
+
+    Earth Engine is initialized lazily inside the fetch path, so a fully cached AOI/date runs
+    without any EE auth or network call.
+    """
+    return run_simulation(config, _store_for(config))
+
+
+def prepare_data(config: SimulationConfig):
+    """Fetch and cache the static + weather layers for an AOI/date without running the engine."""
+    if not config.cache_dir:
+        raise ValueError("prepare_data requires config.cache_dir to be set.")
+    fetch_layers(config, _store_for(config))
+    return config.cache_dir

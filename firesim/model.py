@@ -21,16 +21,62 @@ def _crop(arr, rows, cols):
     return arr[..., :rows, :cols]
 
 
-def build_inputs(config):
-    """Fetch every layer from Earth Engine and wrap them as SpaceTimeCubes."""
-    region = gee.aoi_geometry(config.aoi_bounds)
-    scale = gee.compute_scale(config.aoi_bounds, config.max_pixels, config.min_scale_m)
+def build_inputs(config, store=None):
+    """Fetch (or load cached) every layer and wrap them as SpaceTimeCubes.
 
+    Pass a `cache.DataStore` to reuse previously fetched static/weather layers; on a miss the
+    layers are fetched and persisted so later runs (e.g. a different ignition point) skip the
+    download.
+    """
+    static, weather_stack = fetch_layers(config, store)
+    return assemble_inputs(config, static, weather_stack)
+
+
+def fetch_layers(config, store=None):
+    """Return (static dict, WeatherStack), loading from and populating `store` when given.
+
+    Earth Engine is initialized lazily: a fully cached AOI/date needs neither EE auth nor a
+    network call, so repeated runs at new ignition points stay offline and fast.
+    """
+    scale = gee.compute_scale(config.aoi_bounds, config.max_pixels, config.min_scale_m)
+    region_state = {"region": None, "ready": False}  # EE initialized + region built on first fetch
+
+    def ensure_region():
+        if not region_state["ready"]:
+            gee.initialize_ee(config.ee_project)
+            region_state["region"] = gee.aoi_geometry(config.aoi_bounds)
+            region_state["ready"] = True
+        return region_state["region"]
+
+    static = store.load_static(config) if store else None
+    if static is None:
+        static = fetch_static(config, ensure_region(), scale)
+        if store:
+            store.save_static(config, static)
+
+    weather_stack = store.load_weather(config) if store else None
+    if weather_stack is None:
+        weather_stack = weather.get_weather(config, ensure_region(), scale)
+        if store:
+            store.save_weather(config, weather_stack)
+
+    return static, weather_stack
+
+
+def fetch_static(config, region, scale):
+    """Fetch the date-independent layers: slope, aspect, landcover, water."""
     slope, aspect = gee.fetch_topography(region, scale)
     landcover = gee.fetch_landcover(region, scale)
-    fuel_model = physics.nlcd_to_fuel_model(landcover)
     water = gee.fetch_water_mask(region, scale, config.water_fraction_threshold)
-    weather_stack = weather.get_weather(config, region, scale)
+    return {"slope": slope, "aspect": aspect, "landcover": landcover, "water": water}
+
+
+def assemble_inputs(config, static, weather_stack):
+    """Align, mask, and wrap fetched layers into pyretechnics SpaceTimeCubes + metadata."""
+    scale = gee.compute_scale(config.aoi_bounds, config.max_pixels, config.min_scale_m)
+    slope, aspect = static["slope"], static["aspect"]
+    fuel_model = physics.nlcd_to_fuel_model(static["landcover"])
+    water = static["water"]
 
     # Align all layers to a common grid (downloads can differ by a pixel).
     sample = next(iter(weather_stack.cubes.values()))
@@ -81,9 +127,9 @@ def build_inputs(config):
     return space_time_cubes, meta
 
 
-def run_simulation(config):
+def run_simulation(config, store=None):
     """Build inputs, spread the fire, and return matrices + metadata + stats."""
-    space_time_cubes, meta = build_inputs(config)
+    space_time_cubes, meta = build_inputs(config, store)
     ignition_rc = lonlat_to_rc(*config.ignition_lonlat, config.aoi_bounds, meta["rows"], meta["cols"])
 
     spread_state = els.SpreadState(meta["cube_shape"]).ignite_cell(ignition_rc)
