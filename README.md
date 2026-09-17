@@ -113,6 +113,25 @@ pyroSim run --aoi-bounds -123.13 41.41 -122.89 41.56 --ignition-lonlat -123.06 4
 `run` also fills the cache on a miss, so `fetch` is optional. Delete the directory to invalidate.
 `--mock` never touches the cache.
 
+## Burn probability (Monte Carlo)
+
+Many random ignitions over one area, aggregated per cell:
+
+```bash
+pyroSim montecarlo --aoi-bounds -123.13 41.41 -122.89 41.56 \
+  --ignition-date 2024-07-03 --projection-days 3 -n 50 --seed 7 \
+  --cache-dir ./cache -o shelly_mc.tif
+```
+
+Inputs are assembled once and reused across iterations; ignitions are drawn uniformly from
+burnable cells (not weighted by any ignition-probability map). The output is a 5-band GeoTIFF:
+`burn_count`, `mean/p10/p90_fireline_intensity_kw_m`, `burn_probability`. `--summary-json` writes
+the headline numbers. Memory is iterations x rows x cols x 4 bytes, so watch large areas.
+
+In the app this is the **Burn probability** tab: draw an area, set date, horizon, iterations and
+seed, then run with a progress bar. It reports intensity in kW/m (not flame-length bands) and
+shares the layer cache with the fire-runs tab.
+
 ## Natural-language agent
 
 `agents/pyrosim_agent/` is a Google ADK agent that runs and compares pyroSim simulations from

@@ -25,11 +25,14 @@ from streamlit_folium import st_folium
 REPO_ROOT = Path(__file__).resolve().parents[1]
 AGENT_DIR = REPO_ROOT / "agents" / "pyrosim_agent"
 sys.path.insert(0, str(REPO_ROOT / "agents"))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 load_dotenv(AGENT_DIR / ".env")
 
 from google.genai import types  # noqa: E402
 
 from pyrosim_agent import maps, tools  # noqa: E402
+
+import montecarlo_panel  # noqa: E402  (its own tab; shares only the layer cache)
 
 APP_NAME = "pyrosim"
 USER_ID = "local-user"
@@ -591,9 +594,8 @@ def chat_panel():
 LAYOUTS = {"Split": [3, 2], "Map focus": [1, 0], "Chat focus": [2, 3]}
 
 
-def main():
-    init_state()
-    sidebar()
+def fire_runs_tab():
+    """The agent-driven single-fire interface (map + chat)."""
     header = st.columns([2, 3])
     layout = header[0].segmented_control("Layout", list(LAYOUTS), default="Split", key="layout",
                                          help="Map focus hides the chat; the sidebar collapses with «")
@@ -609,6 +611,16 @@ def main():
         map_panel()
     with chat_column:
         chat_panel()
+
+
+def main():
+    init_state()
+    sidebar()
+    runs_tab, mc_tab = st.tabs(["🔥 Fire runs", "📊 Burn probability"])
+    with runs_tab:
+        fire_runs_tab()
+    with mc_tab:
+        montecarlo_panel.render()
 
 
 main()

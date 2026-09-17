@@ -23,8 +23,11 @@ def _sample_ignition_cells(burnable_mask, n, rng):
     return [tuple(cells[i]) for i in picks]
 
 
-def run_monte_carlo(config, iterations, seed=None, store=None, progress=True):
+def run_monte_carlo(config, iterations, seed=None, store=None, progress=True, progress_callback=None):
     """Run `iterations` random-ignition fires and aggregate per-cell probability + intensity.
+
+    `progress_callback(done, total)` is called after each iteration, for UIs that draw their own
+    progress bar instead of the terminal one.
 
     Returns a dict with the 2D aggregate bands (burn_count, mean/p10/p90 intensity, probability),
     the metadata, the iteration count, and the sampled ignition cells.
@@ -47,6 +50,8 @@ def run_monte_carlo(config, iterations, seed=None, store=None, progress=True):
         burned = matrices["fire_type"] > 0
         burn_count += burned
         intensity_stack[i][burned] = matrices["fireline_intensity"][burned]
+        if progress_callback:
+            progress_callback(i + 1, iterations)
 
     aggregate = _aggregate(burn_count, intensity_stack, iterations)
     aggregate.update({"meta": meta, "iterations": iterations, "ignition_cells": ignition_cells})
