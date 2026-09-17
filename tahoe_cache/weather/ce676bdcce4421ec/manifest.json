@@ -1,0 +1,22 @@
+{
+  "allow_gridmet_fallback": true,
+  "aoi_bounds": [
+    -120.55,
+    39.0,
+    -120.3,
+    39.2
+  ],
+  "band_duration_min": 360.0,
+  "ignition_date": "2026-09-10",
+  "max_pixels": 160,
+  "min_scale_m": 30.0,
+  "projection_days": 5,
+  "source": "weathernext",
+  "start_hour": 12,
+  "start_minutes": 0.0,
+  "water_fraction_threshold": 0.25,
+  "weather_source": "weathernext",
+  "weathernext_init_time": null,
+  "weathernext_stat": "mean",
+  "weathernext_step_hours": 6
+}

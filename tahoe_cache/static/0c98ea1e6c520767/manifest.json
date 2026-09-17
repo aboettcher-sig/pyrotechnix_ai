@@ -1,0 +1,11 @@
+{
+  "aoi_bounds": [
+    -120.55,
+    39.0,
+    -120.3,
+    39.2
+  ],
+  "max_pixels": 160,
+  "min_scale_m": 30.0,
+  "water_fraction_threshold": 0.25
+}

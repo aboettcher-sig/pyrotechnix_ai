@@ -106,3 +106,40 @@ intensity.
 | `2` | Moderate | 1.2–2.4 m |
 | `3` | High | 2.4–3.4 m |
 | `4` | Very high | > 3.4 m |
+
+## Reusing fetched data (cache)
+
+Earth Engine downloads are the slow part of a run. Pass `--cache-dir DIR` to store the fetched
+layers on disk and reuse them. The cache is split into two groups:
+
+- **static** — slope, aspect, land cover, water (depend only on the AOI grid).
+- **weather** — the weather cubes (depend on the AOI grid *and* the date/backend).
+
+So changing only the **ignition point** reuses everything (no download); changing only the
+**date** reuses the static layers and refetches just the weather.
+
+### Pre-fetch, then run several ignition points
+
+```bash
+# Download once for an AOI/date into ./tahoe_cache
+pyroSim fetch \
+  --aoi-bounds -120.55 39.00 -120.30 39.20 \
+  --ignition-date 2026-09-10 \
+  --projection-days 5 \
+  --weather-source weathernext \
+  --cache-dir ./tahoe_cache
+
+# Run different ignition points with no re-download
+pyroSim run --aoi-bounds -120.55 39.00 -120.30 39.20 --ignition-lonlat -120.45 39.10 \
+  --ignition-date 2026-09-10 --projection-days 5 --weather-source weathernext \
+  --cache-dir ./tahoe_cache -o point_a.tif
+
+pyroSim run --aoi-bounds -120.55 39.00 -120.30 39.20 --ignition-lonlat -120.40 39.05 \
+  --ignition-date 2026-09-10 --projection-days 5 --weather-source weathernext \
+  --cache-dir ./tahoe_cache -o point_b.tif
+```
+
+`fetch` accepts `--static-only` to download just the date-independent layers. `run` also
+populates the cache on a miss, so the first `run` alone is enough to speed up later ones — the
+explicit `fetch` step is optional. The AOI/date/grid parameters must match for a cache hit;
+delete the cache directory to invalidate it.
