@@ -13,11 +13,12 @@ Typical use (from the notebook)::
 from .cache import DataStore
 from .config import SimulationConfig
 from .gee import initialize_ee
-from .model import fetch_layers, run_simulation
+from .model import fetch_layers, run_simulation, spread_once
+from .montecarlo import run_monte_carlo
 from . import observed, raster, severity, viz
 
 __all__ = ["SimulationConfig", "run", "prepare_data", "viz", "raster", "observed", "severity",
-           "DataStore", "initialize_ee", "run_simulation"]
+           "DataStore", "initialize_ee", "run_simulation", "spread_once", "run_monte_carlo"]
 
 
 def _store_for(config: SimulationConfig):
