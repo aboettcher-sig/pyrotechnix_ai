@@ -21,3 +21,5 @@ python-dotenv>=1.0.0
 jupyter>=1.0.0
 ipykernel>=6.0.0
 folium>=0.15.0
+streamlit>=1.40
+streamlit-folium>=0.22

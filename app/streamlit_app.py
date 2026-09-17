@@ -265,9 +265,23 @@ def sidebar():
         if mode == "mock":
             st.caption("Mock numbers are synthetic test output, not fire behavior.")
 
+        api_key = st.text_input("Gemini API Key", value=os.environ.get("GEMINI_API_KEY", ""), type="password",
+                                help="Paste your Gemini API key from Google AI Studio (https://aistudio.google.com/app/apikey)")
+        if api_key and api_key != os.environ.get("GEMINI_API_KEY"):
+            os.environ["GEMINI_API_KEY"] = api_key
+            env_file = AGENT_DIR / ".env"
+            current_env = env_file.read_text() if env_file.exists() else ""
+            if "GEMINI_API_KEY=" in current_env:
+                import re
+                current_env = re.sub(r'GEMINI_API_KEY=.*', f'GEMINI_API_KEY="{api_key}"', current_env)
+            else:
+                current_env += f'\nGEMINI_API_KEY="{api_key}"\n'
+            env_file.write_text(current_env)
+            st.rerun()
+
         project = os.environ.get("GOOGLE_CLOUD_PROJECT")
         st.caption(f"Agent model: `{os.environ.get('PYROSIM_AGENT_MODEL', 'gemini-flash-latest')}` · "
-                   f"project: `{project or 'not set'}`")
+                   f"auth: `{'API key set' if os.environ.get('GEMINI_API_KEY') else ('project ' + project if project else 'not set')}`")
         if st.button("New conversation", use_container_width=True):
             for key in ("messages", "session_id"):
                 st.session_state.pop(key, None)

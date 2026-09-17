@@ -26,3 +26,5 @@ Requires-Dist: python-dotenv>=1.0.0
 Requires-Dist: jupyter>=1.0.0
 Requires-Dist: ipykernel>=6.0.0
 Requires-Dist: folium>=0.15.0
+Requires-Dist: streamlit>=1.40
+Requires-Dist: streamlit-folium>=0.22
